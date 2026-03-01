@@ -92,10 +92,10 @@ export default function ViewerToolbar({
     <div
       className="flex items-center gap-1 px-3 py-2 rounded-xl"
       style={{
-        background: "rgba(15, 20, 32, 0.9)",
+        background: "rgba(255,255,255,0.92)",
         border: "1px solid var(--border-subtle)",
         backdropFilter: "blur(12px)",
-        boxShadow: "0 4px 24px rgba(0,0,0,0.4)",
+        boxShadow: "0 4px 16px rgba(0,0,0,0.1)",
       }}
     >
       {/* Tools */}

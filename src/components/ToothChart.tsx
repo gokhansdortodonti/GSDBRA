@@ -184,22 +184,22 @@ function ToothButton({
           d={TOOTH_SHAPES[tooth.label] || TOOTH_SHAPES["1"]}
           fill={
             isSelected
-              ? "rgba(59, 130, 246, 0.6)"
+              ? "rgba(37, 99, 235, 0.25)"
               : hasBracket
-              ? "rgba(6, 182, 212, 0.4)"
-              : "rgba(226, 232, 240, 0.15)"
+              ? "rgba(8, 145, 178, 0.2)"
+              : "#f1f5f9"
           }
           stroke={
             isSelected
-              ? "var(--accent-blue-light)"
+              ? "var(--accent-blue)"
               : hasBracket
               ? "var(--accent-cyan)"
-              : "var(--border-subtle)"
+              : "#94a3b8"
           }
-          strokeWidth="0.5"
+          strokeWidth="0.6"
         />
         {hasBracket && (
-          <rect x="4" y="5" width="6" height="3" rx="0.5" fill="rgba(6, 182, 212, 0.8)" />
+          <rect x="4" y="5" width="6" height="3" rx="0.5" fill="rgba(8, 145, 178, 0.7)" />
         )}
       </svg>
       <span

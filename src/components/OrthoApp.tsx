@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
 import * as THREE from "three";
 import {
@@ -16,6 +16,7 @@ import {
   Bell,
   CheckCircle2,
   AlertTriangle,
+  FolderOpen,
 } from "lucide-react";
 import ToothChart from "./ToothChart";
 import SegmentationPanel from "./SegmentationPanel";
@@ -49,6 +50,12 @@ export default function OrthoApp() {
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [segmentationDone, setSegmentationDone] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
+  const [importedFile, setImportedFile] = useState<File | null>(null);
+
+  // File input ref for triggering import dialog
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  // Callback ref to pass file to ThreeViewer
+  const importFileCallbackRef = useRef<((file: File) => void) | null>(null);
 
   const showNotification = (msg: string) => {
     setNotification(msg);
@@ -122,6 +129,19 @@ export default function OrthoApp() {
     });
   };
 
+  // Handle file selection from input
+  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportedFile(file);
+    if (importFileCallbackRef.current) {
+      importFileCallbackRef.current(file);
+    }
+    showNotification(`Importing ${file.name}…`);
+    // Reset input so same file can be re-selected
+    e.target.value = "";
+  };
+
   const placedBracketsList = Array.from(brackets.values()).map((b) => ({
     toothId: b.toothId,
     position: b.position,
@@ -136,9 +156,18 @@ export default function OrthoApp() {
       className="flex flex-col h-screen"
       style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
     >
+      {/* Hidden file input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".stl,.obj,.ply"
+        className="hidden"
+        onChange={handleFileInputChange}
+      />
+
       {/* Top Navigation Bar */}
       <header
-        className="flex items-center gap-4 px-4 h-12 flex-shrink-0"
+        className="flex items-center gap-4 px-4 h-12 flex-shrink-0 panel-shadow"
         style={{
           background: "var(--bg-secondary)",
           borderBottom: "1px solid var(--border-subtle)",
@@ -150,7 +179,7 @@ export default function OrthoApp() {
             className="w-7 h-7 rounded-lg flex items-center justify-center"
             style={{
               background: "linear-gradient(135deg, var(--accent-blue), var(--accent-cyan))",
-              boxShadow: "0 0 12px rgba(37, 99, 235, 0.5)",
+              boxShadow: "0 0 10px rgba(37, 99, 235, 0.3)",
             }}
           >
             <Activity size={14} color="#fff" />
@@ -159,7 +188,7 @@ export default function OrthoApp() {
             <span className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
               OrthoScan
             </span>
-            <span className="text-xs ml-1" style={{ color: "var(--accent-cyan)" }}>
+            <span className="text-xs ml-1 font-semibold" style={{ color: "var(--accent-blue)" }}>
               Pro
             </span>
           </div>
@@ -180,7 +209,7 @@ export default function OrthoApp() {
         {/* Center - Workflow Steps */}
         <div className="flex items-center gap-1 mx-auto">
           {[
-            { step: 1, label: "Import", done: true },
+            { step: 1, label: "Import", done: !!importedFile },
             { step: 2, label: "Segment", done: segmentationDone },
             { step: 3, label: "Plan", done: false, active: true },
             { step: 4, label: "Review", done: false },
@@ -195,7 +224,7 @@ export default function OrthoApp() {
                       ? "var(--accent-green)"
                       : item.active
                       ? "var(--accent-blue)"
-                      : "var(--bg-card)",
+                      : "#e2e8f0",
                     border: `1px solid ${
                       item.done
                         ? "var(--accent-green)"
@@ -237,22 +266,24 @@ export default function OrthoApp() {
         {/* Right Actions */}
         <div className="flex items-center gap-2 ml-auto">
           <button
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-slate-100"
             style={{
               background: "var(--bg-card)",
               border: "1px solid var(--border-subtle)",
               color: "var(--text-secondary)",
             }}
+            onClick={() => fileInputRef.current?.click()}
+            title="Import STL / OBJ / PLY"
           >
-            <Upload size={12} />
-            Import
+            <FolderOpen size={12} />
+            Import Scan
           </button>
           <button
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
             style={{
               background: "linear-gradient(135deg, var(--accent-blue), #1d4ed8)",
               color: "#fff",
-              boxShadow: "0 2px 8px rgba(37, 99, 235, 0.4)",
+              boxShadow: "0 2px 8px rgba(37, 99, 235, 0.3)",
             }}
           >
             <Download size={12} />
@@ -262,13 +293,13 @@ export default function OrthoApp() {
             className="w-px h-5"
             style={{ background: "var(--border-subtle)" }}
           />
-          <button className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ color: "var(--text-muted)" }}>
+          <button className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-slate-100" style={{ color: "var(--text-muted)" }}>
             <Bell size={14} />
           </button>
-          <button className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ color: "var(--text-muted)" }}>
+          <button className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-slate-100" style={{ color: "var(--text-muted)" }}>
             <Settings size={14} />
           </button>
-          <button className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ color: "var(--text-muted)" }}>
+          <button className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-slate-100" style={{ color: "var(--text-muted)" }}>
             <HelpCircle size={14} />
           </button>
           <div
@@ -284,7 +315,7 @@ export default function OrthoApp() {
       <div className="flex flex-1 overflow-hidden">
         {/* Left Sidebar */}
         <aside
-          className="flex flex-col flex-shrink-0 transition-all duration-300"
+          className="flex flex-col flex-shrink-0 transition-all duration-300 panel-shadow"
           style={{
             width: leftCollapsed ? "40px" : "260px",
             background: "var(--bg-panel)",
@@ -294,7 +325,7 @@ export default function OrthoApp() {
           {leftCollapsed ? (
             <button
               onClick={() => setLeftCollapsed(false)}
-              className="flex items-center justify-center h-10 w-full"
+              className="flex items-center justify-center h-10 w-full hover:bg-slate-100"
               style={{ color: "var(--text-muted)" }}
             >
               <ChevronRight size={16} />
@@ -312,7 +343,7 @@ export default function OrthoApp() {
                     onClick={() => setLeftTab(tab)}
                     className="flex-1 py-2.5 text-xs font-semibold capitalize transition-all"
                     style={{
-                      color: leftTab === tab ? "var(--accent-blue-light)" : "var(--text-muted)",
+                      color: leftTab === tab ? "var(--accent-blue)" : "var(--text-muted)",
                       borderBottom: `2px solid ${leftTab === tab ? "var(--accent-blue)" : "transparent"}`,
                       background: "transparent",
                     }}
@@ -322,12 +353,27 @@ export default function OrthoApp() {
                 ))}
                 <button
                   onClick={() => setLeftCollapsed(true)}
-                  className="px-2 flex items-center"
+                  className="px-2 flex items-center hover:bg-slate-100"
                   style={{ color: "var(--text-muted)" }}
                 >
                   <ChevronLeft size={14} />
                 </button>
               </div>
+
+              {/* Import file info strip */}
+              {importedFile && (
+                <div
+                  className="flex items-center gap-2 px-3 py-2 text-xs"
+                  style={{
+                    background: "rgba(37, 99, 235, 0.06)",
+                    borderBottom: "1px solid rgba(37, 99, 235, 0.15)",
+                    color: "var(--accent-blue)",
+                  }}
+                >
+                  <Upload size={10} />
+                  <span className="truncate">{importedFile.name}</span>
+                </div>
+              )}
 
               {/* Sidebar Content */}
               <div className="flex-1 overflow-y-auto p-3">
@@ -364,6 +410,11 @@ export default function OrthoApp() {
             viewMode={viewMode}
             showGrid={showGrid}
             showWireframe={showWireframe}
+            onModelLoaded={(mesh) => {
+              showNotification(`Model loaded — OCS aligned automatically`);
+              // Store the import callback so the header button can also trigger it
+              void mesh;
+            }}
           />
 
           {/* Toolbar - floating at top center */}
@@ -386,13 +437,14 @@ export default function OrthoApp() {
           <div
             className="absolute bottom-4 left-4 flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
             style={{
-              background: "rgba(15, 20, 32, 0.85)",
+              background: "rgba(255,255,255,0.88)",
               border: "1px solid var(--border-subtle)",
               backdropFilter: "blur(8px)",
               color: "var(--text-muted)",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
             }}
           >
-            <Zap size={11} style={{ color: "var(--accent-cyan)" }} />
+            <Zap size={11} style={{ color: "var(--accent-blue)" }} />
             <span>
               Tool:{" "}
               <span style={{ color: "var(--text-secondary)" }}>
@@ -404,7 +456,7 @@ export default function OrthoApp() {
               </span>
             </span>
             {activeTool === "place" && (
-              <span style={{ color: "var(--accent-cyan)" }}>
+              <span style={{ color: "var(--accent-blue)" }}>
                 — Click tooth to place
               </span>
             )}
@@ -414,12 +466,13 @@ export default function OrthoApp() {
           <div
             className="absolute bottom-4 right-4 flex flex-col gap-1.5 text-xs"
             style={{
-              background: "rgba(15, 20, 32, 0.85)",
+              background: "rgba(255,255,255,0.88)",
               border: "1px solid var(--border-subtle)",
               backdropFilter: "blur(8px)",
               padding: "10px 14px",
               borderRadius: "10px",
               color: "var(--text-muted)",
+              boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
             }}
           >
             <div className="flex items-center gap-2">
@@ -440,9 +493,9 @@ export default function OrthoApp() {
               <div className="flex items-center gap-2">
                 <div
                   className="w-1.5 h-1.5 rounded-full"
-                  style={{ background: "var(--accent-blue-light)" }}
+                  style={{ background: "var(--accent-blue)" }}
                 />
-                <span>Selected: <span style={{ color: "var(--accent-blue-light)" }}>#{selectedTooth}</span></span>
+                <span>Selected: <span style={{ color: "var(--accent-blue)" }}>#{selectedTooth}</span></span>
               </div>
             )}
           </div>
@@ -452,11 +505,11 @@ export default function OrthoApp() {
             <div
               className="absolute top-20 left-1/2 -translate-x-1/2 flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-medium fade-in"
               style={{
-                background: "rgba(16, 185, 129, 0.15)",
-                border: "1px solid rgba(16, 185, 129, 0.4)",
+                background: "rgba(5, 150, 105, 0.1)",
+                border: "1px solid rgba(5, 150, 105, 0.35)",
                 backdropFilter: "blur(12px)",
                 color: "var(--accent-green)",
-                boxShadow: "0 4px 20px rgba(16, 185, 129, 0.2)",
+                boxShadow: "0 4px 16px rgba(5, 150, 105, 0.15)",
               }}
             >
               <CheckCircle2 size={13} />
@@ -469,8 +522,8 @@ export default function OrthoApp() {
             <div
               className="absolute top-20 right-4 flex items-center gap-2 px-3 py-2 rounded-lg text-xs"
               style={{
-                background: "rgba(245, 158, 11, 0.1)",
-                border: "1px solid rgba(245, 158, 11, 0.3)",
+                background: "rgba(217, 119, 6, 0.08)",
+                border: "1px solid rgba(217, 119, 6, 0.25)",
                 color: "var(--accent-amber)",
                 maxWidth: "220px",
               }}
@@ -483,7 +536,7 @@ export default function OrthoApp() {
 
         {/* Right Sidebar */}
         <aside
-          className="flex flex-col flex-shrink-0 transition-all duration-300"
+          className="flex flex-col flex-shrink-0 transition-all duration-300 panel-shadow"
           style={{
             width: rightCollapsed ? "40px" : "260px",
             background: "var(--bg-panel)",
@@ -493,7 +546,7 @@ export default function OrthoApp() {
           {rightCollapsed ? (
             <button
               onClick={() => setRightCollapsed(false)}
-              className="flex items-center justify-center h-10 w-full"
+              className="flex items-center justify-center h-10 w-full hover:bg-slate-100"
               style={{ color: "var(--text-muted)" }}
             >
               <ChevronLeft size={16} />
@@ -510,6 +563,7 @@ export default function OrthoApp() {
                 </span>
                 <button
                   onClick={() => setRightCollapsed(true)}
+                  className="hover:bg-slate-100 rounded p-0.5"
                   style={{ color: "var(--text-muted)" }}
                 >
                   <ChevronRight size={14} />
@@ -535,14 +589,13 @@ export default function OrthoApp() {
               >
                 <div className="flex flex-col gap-2">
                   <button
-                    className="w-full py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-all"
+                    className="w-full py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-all hover:bg-slate-100"
                     style={{
                       background: "var(--bg-card)",
                       border: "1px solid var(--border-subtle)",
                       color: "var(--text-secondary)",
                     }}
                     onClick={() => {
-                      // Place all brackets with default prescription
                       const allTeeth = activeJaw === "upper"
                         ? [11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27]
                         : [41, 42, 43, 44, 45, 46, 47, 31, 32, 33, 34, 35, 36, 37];
@@ -571,8 +624,8 @@ export default function OrthoApp() {
                   <button
                     className="w-full py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-all"
                     style={{
-                      background: "rgba(239, 68, 68, 0.08)",
-                      border: "1px solid rgba(239, 68, 68, 0.2)",
+                      background: "rgba(220, 38, 38, 0.06)",
+                      border: "1px solid rgba(220, 38, 38, 0.18)",
                       color: "var(--accent-red)",
                     }}
                     onClick={() => {

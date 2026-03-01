@@ -1,21 +1,24 @@
 @import "tailwindcss";
 
 :root {
-  --bg-primary: #0a0d14;
-  --bg-secondary: #0f1420;
-  --bg-panel: #131825;
-  --bg-card: #1a2035;
-  --border-subtle: #1e2a40;
+  /* Light clinical theme */
+  --bg-primary: #f0f4f8;
+  --bg-secondary: #ffffff;
+  --bg-panel: #f8fafc;
+  --bg-card: #ffffff;
+  --border-subtle: #cbd5e1;
   --border-active: #2563eb;
   --accent-blue: #2563eb;
   --accent-blue-light: #3b82f6;
-  --accent-cyan: #06b6d4;
-  --accent-green: #10b981;
-  --accent-amber: #f59e0b;
-  --accent-red: #ef4444;
-  --text-primary: #e2e8f0;
-  --text-secondary: #94a3b8;
-  --text-muted: #475569;
+  --accent-cyan: #0891b2;
+  --accent-green: #059669;
+  --accent-amber: #d97706;
+  --accent-red: #dc2626;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
+  --text-muted: #64748b;
+  /* Viewer background */
+  --viewer-bg: #e8edf5;
 }
 
 * {
@@ -50,10 +53,10 @@ html, body {
 
 /* Glow effects */
 .glow-blue {
-  box-shadow: 0 0 20px rgba(37, 99, 235, 0.3);
+  box-shadow: 0 0 20px rgba(37, 99, 235, 0.2);
 }
 .glow-cyan {
-  box-shadow: 0 0 20px rgba(6, 182, 212, 0.3);
+  box-shadow: 0 0 20px rgba(8, 145, 178, 0.2);
 }
 
 /* Gradient borders */
@@ -68,7 +71,7 @@ html, body {
   inset: 0;
   border-radius: 8px;
   padding: 1px;
-  background: linear-gradient(135deg, rgba(37, 99, 235, 0.4), rgba(6, 182, 212, 0.2), transparent);
+  background: linear-gradient(135deg, rgba(37, 99, 235, 0.3), rgba(8, 145, 178, 0.15), transparent);
   -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
@@ -102,7 +105,7 @@ html, body {
   left: 0;
   right: 0;
   height: 2px;
-  background: linear-gradient(90deg, transparent, rgba(6, 182, 212, 0.6), transparent);
+  background: linear-gradient(90deg, transparent, rgba(8, 145, 178, 0.5), transparent);
   animation: scan-line 3s linear infinite;
 }
 
@@ -141,4 +144,10 @@ html, body {
   white-space: nowrap;
   z-index: 100;
   pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+}
+
+/* Panel shadow */
+.panel-shadow {
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.05);
 }
