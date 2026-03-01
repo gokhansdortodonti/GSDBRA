@@ -1,176 +1,133 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import dynamic from "next/dynamic";
-import * as THREE from "three";
 import {
   Activity,
-  ChevronLeft,
   ChevronRight,
-  Download,
-  Upload,
   Settings,
   HelpCircle,
-  Zap,
   User,
   Bell,
-  CheckCircle2,
-  AlertTriangle,
-  FolderOpen,
+  Grid3x3,
+  Maximize2,
+  RotateCcw,
+  Eye,
+  EyeOff,
 } from "lucide-react";
-import ToothChart from "./ToothChart";
-import SegmentationPanel from "./SegmentationPanel";
-import BracketProperties from "./BracketProperties";
-import ViewerToolbar from "./ViewerToolbar";
+import ScanLoader, { type ScanFile } from "./ScanLoader";
+import OcclusalAlignment from "./OcclusalAlignment";
+import type { ThreeViewerHandle } from "./ThreeViewer";
 
-// Dynamic import for Three.js viewer (client-side only)
+// Dynamic import — Three.js is client-side only
 const ThreeViewer = dynamic(() => import("./ThreeViewer"), { ssr: false });
 
-interface BracketData {
-  toothId: number;
-  torque: number;
-  angulation: number;
-  inOut: number;
-  system: string;
-  position: THREE.Vector3;
-}
+// ─── Workflow stages ──────────────────────────────────────────────────────────
+type Stage = "load" | "align" | "plan";
 
-type SidebarTab = "segmentation" | "teeth" | "properties";
+const STAGES: { id: Stage; label: string }[] = [
+  { id: "load", label: "Load Scan" },
+  { id: "align", label: "Occlusal Alignment" },
+  { id: "plan", label: "Bracket Planning" },
+];
 
+// ─── Main app ─────────────────────────────────────────────────────────────────
 export default function OrthoApp() {
-  const [activeJaw, setActiveJaw] = useState<"upper" | "lower">("upper");
-  const [selectedTooth, setSelectedTooth] = useState<number | null>(null);
-  const [brackets, setBrackets] = useState<Map<number, BracketData>>(new Map());
-  const [viewMode, setViewMode] = useState<"perspective" | "front" | "top" | "side">("perspective");
+  const [stage, setStage] = useState<Stage>("load");
+  const [maxillaFile, setMaxillaFile] = useState<ScanFile | null>(null);
+  const [mandibleFile, setMandibleFile] = useState<ScanFile | null>(null);
   const [showGrid, setShowGrid] = useState(true);
-  const [showWireframe, setShowWireframe] = useState(false);
-  const [activeTool, setActiveTool] = useState<"select" | "place" | "move">("select");
-  const [leftTab, setLeftTab] = useState<SidebarTab>("segmentation");
-  const [rightCollapsed, setRightCollapsed] = useState(false);
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [segmentationDone, setSegmentationDone] = useState(false);
+  const [wireframe, setWireframe] = useState(false);
+  const [viewMode, setViewMode] = useState<"perspective" | "front" | "top" | "side">("perspective");
   const [notification, setNotification] = useState<string | null>(null);
-  const [importedFile, setImportedFile] = useState<File | null>(null);
 
-  // File input ref for triggering import dialog
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  // Callback ref to pass file to ThreeViewer
-  const importFileCallbackRef = useRef<((file: File) => void) | null>(null);
+  const viewerRef = useRef<ThreeViewerHandle>(null);
 
-  const showNotification = (msg: string) => {
+  const notify = useCallback((msg: string, ms = 3000) => {
     setNotification(msg);
-    setTimeout(() => setNotification(null), 3000);
-  };
+    setTimeout(() => setNotification(null), ms);
+  }, []);
 
-  const handleToothClick = useCallback(
-    (toothId: number, position: THREE.Vector3) => {
-      setSelectedTooth(toothId);
-      if (activeTool === "place" && !brackets.has(toothId)) {
-        const prescription: Record<number, { torque: number; angulation: number }> = {
-          11: { torque: 17, angulation: 5 }, 12: { torque: 10, angulation: 9 },
-          13: { torque: -7, angulation: 11 }, 14: { torque: -7, angulation: 2 },
-          15: { torque: -7, angulation: 2 }, 16: { torque: -14, angulation: 5 },
-          17: { torque: -14, angulation: 5 }, 21: { torque: 17, angulation: 5 },
-          22: { torque: 10, angulation: 9 }, 23: { torque: -7, angulation: 11 },
-          24: { torque: -7, angulation: 2 }, 25: { torque: -7, angulation: 2 },
-          26: { torque: -14, angulation: 5 }, 27: { torque: -14, angulation: 5 },
-          41: { torque: -1, angulation: 2 }, 42: { torque: -1, angulation: 2 },
-          43: { torque: -11, angulation: 5 }, 44: { torque: -17, angulation: 2 },
-          45: { torque: -17, angulation: 2 }, 46: { torque: -20, angulation: 2 },
-          47: { torque: -10, angulation: 2 }, 31: { torque: -1, angulation: 2 },
-          32: { torque: -1, angulation: 2 }, 33: { torque: -11, angulation: 5 },
-          34: { torque: -17, angulation: 2 }, 35: { torque: -17, angulation: 2 },
-          36: { torque: -20, angulation: 2 }, 37: { torque: -10, angulation: 2 },
-        };
-        const p = prescription[toothId] || { torque: 0, angulation: 0 };
-        setBrackets((prev) => {
-          const next = new Map(prev);
-          next.set(toothId, {
-            toothId,
-            torque: p.torque,
-            angulation: p.angulation,
-            inOut: 0,
-            system: "MBT 0.022\"",
-            position,
-          });
-          return next;
-        });
-        showNotification(`Bracket placed on tooth ${toothId}`);
-      }
-    },
-    [activeTool, brackets]
-  );
+  // ── Load mesh into viewer whenever a file is set ──────────────────────────
+  useEffect(() => {
+    if (!maxillaFile || !viewerRef.current) return;
+    const jaw = maxillaFile.jaw === "combined" ? "maxilla" : "maxilla";
+    viewerRef.current
+      .loadMesh(maxillaFile.file, jaw)
+      .then(() => notify(`${jaw === "maxilla" ? "Maxilla" : "Combined"} scan loaded`))
+      .catch(() => notify("Failed to load scan"));
+  }, [maxillaFile, notify]);
 
-  const handlePlaceBracket = () => {
-    if (!selectedTooth) return;
-    const pos = new THREE.Vector3(0, 0, 0);
-    handleToothClick(selectedTooth, pos);
-  };
+  useEffect(() => {
+    if (!mandibleFile || !viewerRef.current) return;
+    viewerRef.current
+      .loadMesh(mandibleFile.file, "mandible")
+      .then(() => notify("Mandible scan loaded"))
+      .catch(() => notify("Failed to load scan"));
+  }, [mandibleFile, notify]);
 
-  const handleRemoveBracket = () => {
-    if (!selectedTooth) return;
-    setBrackets((prev) => {
-      const next = new Map(prev);
-      next.delete(selectedTooth);
-      return next;
-    });
-    showNotification(`Bracket removed from tooth ${selectedTooth}`);
-  };
-
-  const handleUpdateBracket = (data: Partial<BracketData>) => {
-    if (!selectedTooth) return;
-    setBrackets((prev) => {
-      const next = new Map(prev);
-      const existing = next.get(selectedTooth);
-      if (existing) {
-        next.set(selectedTooth, { ...existing, ...data });
-      }
-      return next;
-    });
-  };
-
-  // Handle file selection from input
-  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setImportedFile(file);
-    if (importFileCallbackRef.current) {
-      importFileCallbackRef.current(file);
+  // ── Scan loader callbacks ─────────────────────────────────────────────────
+  const handleFileLoaded = (scan: ScanFile) => {
+    if (scan.jaw === "maxilla" || scan.jaw === "combined") {
+      setMaxillaFile(scan);
+    } else {
+      setMandibleFile(scan);
     }
-    showNotification(`Importing ${file.name}…`);
-    // Reset input so same file can be re-selected
-    e.target.value = "";
   };
 
-  const placedBracketsList = Array.from(brackets.values()).map((b) => ({
-    toothId: b.toothId,
-    position: b.position,
-    normal: new THREE.Vector3(0, 1, 0),
-  }));
+  const handleFileRemoved = (jaw: "maxilla" | "mandible") => {
+    if (jaw === "maxilla") {
+      setMaxillaFile(null);
+      viewerRef.current?.clearMesh("maxilla");
+    } else {
+      setMandibleFile(null);
+      viewerRef.current?.clearMesh("mandible");
+    }
+  };
 
-  const placedBracketIds = Array.from(brackets.keys());
-  const selectedBracket = selectedTooth ? brackets.get(selectedTooth) || null : null;
+  // ── Drag-and-drop from viewport (jaw assignment dialog) ───────────────────
+  const [dropFile, setDropFile] = useState<File | null>(null);
+  const [showJawPicker, setShowJawPicker] = useState(false);
+
+  useEffect(() => {
+    const el = document.getElementById("viewer-mount");
+    if (!el) return;
+    const handler = (e: Event) => {
+      const file = (e as CustomEvent<{ file: File }>).detail.file;
+      setDropFile(file);
+      setShowJawPicker(true);
+    };
+    el.addEventListener("scanDrop", handler);
+    return () => el.removeEventListener("scanDrop", handler);
+  }, []);
+
+  const assignDropFile = (jaw: "maxilla" | "mandible" | "combined") => {
+    if (!dropFile) return;
+    const scan: ScanFile = {
+      file: dropFile,
+      jaw,
+      name: dropFile.name,
+      size: `${(dropFile.size / (1024 * 1024)).toFixed(1)} MB`,
+    };
+    handleFileLoaded(scan);
+    setDropFile(null);
+    setShowJawPicker(false);
+  };
+
+  const stageIndex = STAGES.findIndex((s) => s.id === stage);
 
   return (
     <div
       className="flex flex-col h-screen"
       style={{ background: "var(--bg-primary)", color: "var(--text-primary)" }}
     >
-      {/* Hidden file input */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".stl,.obj,.ply"
-        className="hidden"
-        onChange={handleFileInputChange}
-      />
-
-      {/* Top Navigation Bar */}
+      {/* ── Top Navigation Bar ─────────────────────────────────────────────── */}
       <header
-        className="flex items-center gap-4 px-4 h-12 flex-shrink-0 panel-shadow"
+        className="flex items-center gap-4 px-4 h-12 flex-shrink-0"
         style={{
           background: "var(--bg-secondary)",
           borderBottom: "1px solid var(--border-subtle)",
+          boxShadow: "0 1px 4px rgba(0,0,0,0.06)",
         }}
       >
         {/* Logo */}
@@ -178,8 +135,8 @@ export default function OrthoApp() {
           <div
             className="w-7 h-7 rounded-lg flex items-center justify-center"
             style={{
-              background: "linear-gradient(135deg, var(--accent-blue), var(--accent-cyan))",
-              boxShadow: "0 0 10px rgba(37, 99, 235, 0.3)",
+              background: "linear-gradient(135deg, #2563eb, #0891b2)",
+              boxShadow: "0 0 10px rgba(37,99,235,0.3)",
             }}
           >
             <Activity size={14} color="#fff" />
@@ -188,111 +145,104 @@ export default function OrthoApp() {
             <span className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
               OrthoScan
             </span>
-            <span className="text-xs ml-1 font-semibold" style={{ color: "var(--accent-blue)" }}>
+            <span className="text-xs ml-1 font-semibold" style={{ color: "#2563eb" }}>
               Pro
             </span>
           </div>
         </div>
 
         {/* Breadcrumb */}
-        <div
-          className="flex items-center gap-1.5 text-xs ml-2"
-          style={{ color: "var(--text-muted)" }}
-        >
+        <div className="flex items-center gap-1.5 text-xs ml-2" style={{ color: "var(--text-muted)" }}>
           <span>Patients</span>
           <ChevronRight size={10} />
           <span>Ahmet Yılmaz</span>
           <ChevronRight size={10} />
-          <span style={{ color: "var(--text-secondary)" }}>Bracket Planning</span>
+          <span style={{ color: "var(--text-secondary)" }}>Scan Import</span>
         </div>
 
-        {/* Center - Workflow Steps */}
+        {/* Workflow steps */}
         <div className="flex items-center gap-1 mx-auto">
-          {[
-            { step: 1, label: "Import", done: !!importedFile },
-            { step: 2, label: "Segment", done: segmentationDone },
-            { step: 3, label: "Plan", done: false, active: true },
-            { step: 4, label: "Review", done: false },
-            { step: 5, label: "Export", done: false },
-          ].map((item, idx) => (
-            <div key={item.step} className="flex items-center">
-              <div className="flex items-center gap-1.5">
-                <div
-                  className="w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold"
-                  style={{
-                    background: item.done
-                      ? "var(--accent-green)"
-                      : item.active
-                      ? "var(--accent-blue)"
-                      : "#e2e8f0",
-                    border: `1px solid ${
-                      item.done
-                        ? "var(--accent-green)"
-                        : item.active
-                        ? "var(--accent-blue)"
-                        : "var(--border-subtle)"
-                    }`,
-                    color: item.done || item.active ? "#fff" : "var(--text-muted)",
-                    fontSize: "9px",
-                  }}
-                >
-                  {item.done ? "✓" : item.step}
+          {STAGES.map((s, idx) => {
+            const done = idx < stageIndex;
+            const active = s.id === stage;
+            return (
+              <div key={s.id} className="flex items-center">
+                <div className="flex items-center gap-1.5">
+                  <div
+                    className="w-5 h-5 rounded-full flex items-center justify-center text-xs font-bold"
+                    style={{
+                      background: done ? "#10b981" : active ? "#2563eb" : "#e2e8f0",
+                      color: done || active ? "#fff" : "var(--text-muted)",
+                      fontSize: "9px",
+                    }}
+                  >
+                    {done ? "✓" : idx + 1}
+                  </div>
+                  <span
+                    className="text-xs"
+                    style={{
+                      color: active
+                        ? "var(--text-primary)"
+                        : done
+                        ? "#10b981"
+                        : "var(--text-muted)",
+                      fontWeight: active ? 600 : 400,
+                    }}
+                  >
+                    {s.label}
+                  </span>
                 </div>
-                <span
-                  className="text-xs"
-                  style={{
-                    color: item.active
-                      ? "var(--text-primary)"
-                      : item.done
-                      ? "var(--accent-green)"
-                      : "var(--text-muted)",
-                  }}
-                >
-                  {item.label}
-                </span>
+                {idx < STAGES.length - 1 && (
+                  <div
+                    className="w-6 h-px mx-1"
+                    style={{ background: done ? "#10b981" : "var(--border-subtle)" }}
+                  />
+                )}
               </div>
-              {idx < 4 && (
-                <div
-                  className="w-6 h-px mx-1"
-                  style={{
-                    background: item.done ? "var(--accent-green)" : "var(--border-subtle)",
-                  }}
-                />
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
 
-        {/* Right Actions */}
-        <div className="flex items-center gap-2 ml-auto">
+        {/* Right actions */}
+        <div className="flex items-center gap-1.5 ml-auto">
           <button
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all hover:bg-slate-100"
-            style={{
-              background: "var(--bg-card)",
-              border: "1px solid var(--border-subtle)",
-              color: "var(--text-secondary)",
-            }}
-            onClick={() => fileInputRef.current?.click()}
-            title="Import STL / OBJ / PLY"
+            onClick={() => setShowGrid((v) => !v)}
+            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-slate-100 transition-colors"
+            style={{ color: showGrid ? "#2563eb" : "var(--text-muted)" }}
+            title="Toggle grid"
           >
-            <FolderOpen size={12} />
-            Import Scan
+            <Grid3x3 size={14} />
           </button>
           <button
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all"
-            style={{
-              background: "linear-gradient(135deg, var(--accent-blue), #1d4ed8)",
-              color: "#fff",
-              boxShadow: "0 2px 8px rgba(37, 99, 235, 0.3)",
+            onClick={() => {
+              setWireframe((v) => !v);
+              viewerRef.current?.setWireframe(!wireframe);
             }}
+            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-slate-100 transition-colors"
+            style={{ color: wireframe ? "#2563eb" : "var(--text-muted)" }}
+            title="Toggle wireframe"
           >
-            <Download size={12} />
-            Export Plan
+            {wireframe ? <Eye size={14} /> : <EyeOff size={14} />}
           </button>
-          <div
-            className="w-px h-5"
-            style={{ background: "var(--border-subtle)" }}
-          />
+          <button
+            onClick={() => viewerRef.current?.resetCamera()}
+            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-slate-100 transition-colors"
+            style={{ color: "var(--text-muted)" }}
+            title="Reset camera"
+          >
+            <RotateCcw size={14} />
+          </button>
+          <button
+            onClick={() => setViewMode("top")}
+            className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-slate-100 transition-colors"
+            style={{ color: viewMode === "top" ? "#2563eb" : "var(--text-muted)" }}
+            title="Top view"
+          >
+            <Maximize2 size={14} />
+          </button>
+
+          <div className="w-px h-5 mx-1" style={{ background: "var(--border-subtle)" }} />
+
           <button className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-slate-100" style={{ color: "var(--text-muted)" }}>
             <Bell size={14} />
           </button>
@@ -303,344 +253,249 @@ export default function OrthoApp() {
             <HelpCircle size={14} />
           </button>
           <div
-            className="w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold"
-            style={{ background: "var(--accent-blue)", color: "#fff" }}
+            className="w-7 h-7 rounded-full flex items-center justify-center"
+            style={{ background: "#2563eb", color: "#fff" }}
           >
             <User size={13} />
           </div>
         </div>
       </header>
 
-      {/* Main Content */}
+      {/* ── Main content ───────────────────────────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left Sidebar */}
+        {/* Left panel */}
         <aside
-          className="flex flex-col flex-shrink-0 transition-all duration-300 panel-shadow"
+          className="flex-shrink-0 overflow-y-auto"
           style={{
-            width: leftCollapsed ? "40px" : "260px",
+            width: "320px",
             background: "var(--bg-panel)",
             borderRight: "1px solid var(--border-subtle)",
+            boxShadow: "2px 0 8px rgba(0,0,0,0.04)",
           }}
         >
-          {leftCollapsed ? (
-            <button
-              onClick={() => setLeftCollapsed(false)}
-              className="flex items-center justify-center h-10 w-full hover:bg-slate-100"
-              style={{ color: "var(--text-muted)" }}
-            >
-              <ChevronRight size={16} />
-            </button>
-          ) : (
-            <>
-              {/* Sidebar Tabs */}
-              <div
-                className="flex border-b"
-                style={{ borderColor: "var(--border-subtle)" }}
+          {stage === "load" && (
+            <ScanLoader
+              maxillaFile={maxillaFile}
+              mandibleFile={mandibleFile}
+              onFileLoaded={handleFileLoaded}
+              onFileRemoved={handleFileRemoved}
+              onProceed={() => setStage("align")}
+            />
+          )}
+
+          {stage === "align" && (
+            <OcclusalAlignment
+              maxillaFile={maxillaFile}
+              mandibleFile={mandibleFile}
+              onAlignmentComplete={() => {
+                notify("Alignment complete!");
+                setStage("plan");
+              }}
+              onBack={() => setStage("load")}
+            />
+          )}
+
+          {stage === "plan" && (
+            <div className="p-5 flex flex-col gap-4">
+              <div className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
+                Bracket Planning
+              </div>
+              <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                Bracket planning tools will appear here.
+              </div>
+              <button
+                onClick={() => setStage("align")}
+                className="text-xs py-2 rounded-lg hover:bg-slate-100 transition-colors"
+                style={{ color: "var(--text-muted)", border: "1px solid var(--border-subtle)" }}
               >
-                {(["segmentation", "teeth"] as SidebarTab[]).map((tab) => (
-                  <button
-                    key={tab}
-                    onClick={() => setLeftTab(tab)}
-                    className="flex-1 py-2.5 text-xs font-semibold capitalize transition-all"
-                    style={{
-                      color: leftTab === tab ? "var(--accent-blue)" : "var(--text-muted)",
-                      borderBottom: `2px solid ${leftTab === tab ? "var(--accent-blue)" : "transparent"}`,
-                      background: "transparent",
-                    }}
-                  >
-                    {tab === "segmentation" ? "Segment" : "Teeth"}
-                  </button>
-                ))}
-                <button
-                  onClick={() => setLeftCollapsed(true)}
-                  className="px-2 flex items-center hover:bg-slate-100"
-                  style={{ color: "var(--text-muted)" }}
-                >
-                  <ChevronLeft size={14} />
-                </button>
-              </div>
-
-              {/* Import file info strip */}
-              {importedFile && (
-                <div
-                  className="flex items-center gap-2 px-3 py-2 text-xs"
-                  style={{
-                    background: "rgba(37, 99, 235, 0.06)",
-                    borderBottom: "1px solid rgba(37, 99, 235, 0.15)",
-                    color: "var(--accent-blue)",
-                  }}
-                >
-                  <Upload size={10} />
-                  <span className="truncate">{importedFile.name}</span>
-                </div>
-              )}
-
-              {/* Sidebar Content */}
-              <div className="flex-1 overflow-y-auto p-3">
-                {leftTab === "segmentation" && (
-                  <SegmentationPanel
-                    onSegmentationComplete={() => {
-                      setSegmentationDone(true);
-                      showNotification("Segmentation complete! 14 teeth detected.");
-                    }}
-                  />
-                )}
-                {leftTab === "teeth" && (
-                  <ToothChart
-                    activeJaw={activeJaw}
-                    selectedTooth={selectedTooth}
-                    placedBrackets={placedBracketIds}
-                    onToothSelect={setSelectedTooth}
-                    onJawChange={setActiveJaw}
-                  />
-                )}
-              </div>
-            </>
+                ← Back to Alignment
+              </button>
+            </div>
           )}
         </aside>
 
         {/* 3D Viewport */}
-        <main className="flex-1 relative overflow-hidden">
-          {/* Viewer */}
+        <main className="flex-1 relative overflow-hidden" id="viewer-mount">
           <ThreeViewer
-            activeJaw={activeJaw}
-            selectedTooth={selectedTooth}
-            placedBrackets={placedBracketsList}
-            onToothClick={handleToothClick}
-            viewMode={viewMode}
+            ref={viewerRef}
             showGrid={showGrid}
-            showWireframe={showWireframe}
-            onModelLoaded={(mesh) => {
-              showNotification(`Model loaded — OCS aligned automatically`);
-              // Store the import callback so the header button can also trigger it
-              void mesh;
+            wireframe={wireframe}
+            viewMode={viewMode}
+            onMeshLoaded={(jaw, name) => {
+              notify(`${jaw === "maxilla" ? "Maxilla" : "Mandible"} loaded: ${name}`);
             }}
           />
 
-          {/* Toolbar - floating at top center */}
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-10">
-            <ViewerToolbar
-              viewMode={viewMode}
-              showGrid={showGrid}
-              showWireframe={showWireframe}
-              activeTool={activeTool}
-              onViewModeChange={setViewMode}
-              onToggleGrid={() => setShowGrid((v) => !v)}
-              onToggleWireframe={() => setShowWireframe((v) => !v)}
-              onToolChange={setActiveTool}
-              onResetView={() => setViewMode("perspective")}
-              onScreenshot={() => showNotification("Screenshot saved!")}
-            />
-          </div>
-
-          {/* Active Tool Indicator */}
+          {/* View mode buttons — floating bottom-left */}
           <div
-            className="absolute bottom-4 left-4 flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs"
-            style={{
-              background: "rgba(255,255,255,0.88)",
-              border: "1px solid var(--border-subtle)",
-              backdropFilter: "blur(8px)",
-              color: "var(--text-muted)",
-              boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
-            }}
+            className="absolute bottom-4 left-4 flex gap-1"
+            style={{ zIndex: 10 }}
           >
-            <Zap size={11} style={{ color: "var(--accent-blue)" }} />
-            <span>
-              Tool:{" "}
-              <span style={{ color: "var(--text-secondary)" }}>
-                {activeTool === "select"
-                  ? "Select"
-                  : activeTool === "place"
-                  ? "Place Bracket"
-                  : "Move Bracket"}
-              </span>
-            </span>
-            {activeTool === "place" && (
-              <span style={{ color: "var(--accent-blue)" }}>
-                — Click tooth to place
-              </span>
-            )}
+            {(["perspective", "front", "top", "side"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setViewMode(m)}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all"
+                style={{
+                  background: viewMode === m ? "#2563eb" : "rgba(255,255,255,0.88)",
+                  color: viewMode === m ? "#fff" : "var(--text-muted)",
+                  border: `1px solid ${viewMode === m ? "#2563eb" : "var(--border-subtle)"}`,
+                  backdropFilter: "blur(8px)",
+                  boxShadow: "0 2px 6px rgba(0,0,0,0.08)",
+                }}
+              >
+                {m.charAt(0).toUpperCase() + m.slice(1)}
+              </button>
+            ))}
           </div>
 
-          {/* Stats overlay */}
-          <div
-            className="absolute bottom-4 right-4 flex flex-col gap-1.5 text-xs"
-            style={{
-              background: "rgba(255,255,255,0.88)",
-              border: "1px solid var(--border-subtle)",
-              backdropFilter: "blur(8px)",
-              padding: "10px 14px",
-              borderRadius: "10px",
-              color: "var(--text-muted)",
-              boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
-            }}
-          >
-            <div className="flex items-center gap-2">
-              <div
-                className="w-1.5 h-1.5 rounded-full"
-                style={{ background: "var(--accent-green)" }}
-              />
-              <span>Jaw: <span style={{ color: "var(--text-secondary)" }}>{activeJaw === "upper" ? "Upper" : "Lower"}</span></span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div
-                className="w-1.5 h-1.5 rounded-full"
-                style={{ background: "var(--accent-cyan)" }}
-              />
-              <span>Brackets: <span style={{ color: "var(--accent-cyan)" }}>{placedBracketIds.length}/14</span></span>
-            </div>
-            {selectedTooth && (
-              <div className="flex items-center gap-2">
-                <div
-                  className="w-1.5 h-1.5 rounded-full"
-                  style={{ background: "var(--accent-blue)" }}
-                />
-                <span>Selected: <span style={{ color: "var(--accent-blue)" }}>#{selectedTooth}</span></span>
-              </div>
-            )}
-          </div>
-
-          {/* Notification Toast */}
-          {notification && (
+          {/* Scan legend — floating bottom-right */}
+          {(maxillaFile || mandibleFile) && (
             <div
-              className="absolute top-20 left-1/2 -translate-x-1/2 flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-medium fade-in"
+              className="absolute bottom-4 right-4 flex flex-col gap-1.5 px-3 py-2.5 rounded-xl text-xs"
               style={{
-                background: "rgba(5, 150, 105, 0.1)",
-                border: "1px solid rgba(5, 150, 105, 0.35)",
-                backdropFilter: "blur(12px)",
-                color: "var(--accent-green)",
-                boxShadow: "0 4px 16px rgba(5, 150, 105, 0.15)",
+                background: "rgba(255,255,255,0.88)",
+                border: "1px solid var(--border-subtle)",
+                backdropFilter: "blur(8px)",
+                boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
               }}
             >
-              <CheckCircle2 size={13} />
-              {notification}
+              {maxillaFile && (
+                <div className="flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 rounded-full" style={{ background: "#f59e0b" }} />
+                  <span style={{ color: "var(--text-secondary)" }}>
+                    {maxillaFile.jaw === "combined" ? "Combined" : "Maxilla"}
+                  </span>
+                </div>
+              )}
+              {mandibleFile && (
+                <div className="flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 rounded-full" style={{ background: "#2563eb" }} />
+                  <span style={{ color: "var(--text-secondary)" }}>Mandible</span>
+                </div>
+              )}
             </div>
           )}
 
-          {/* Segmentation Warning */}
-          {!segmentationDone && (
+          {/* Empty state hint */}
+          {!maxillaFile && !mandibleFile && (
             <div
-              className="absolute top-20 right-4 flex items-center gap-2 px-3 py-2 rounded-lg text-xs"
-              style={{
-                background: "rgba(217, 119, 6, 0.08)",
-                border: "1px solid rgba(217, 119, 6, 0.25)",
-                color: "var(--accent-amber)",
-                maxWidth: "220px",
-              }}
+              className="absolute inset-0 flex items-center justify-center pointer-events-none"
+              style={{ zIndex: 5 }}
             >
-              <AlertTriangle size={12} />
-              <span>Run segmentation to enable bracket placement</span>
+              <div
+                className="flex flex-col items-center gap-3 px-8 py-6 rounded-2xl text-center"
+                style={{
+                  background: "rgba(255,255,255,0.75)",
+                  border: "1.5px dashed #cbd5e1",
+                  backdropFilter: "blur(8px)",
+                  maxWidth: "320px",
+                }}
+              >
+                <div
+                  className="w-12 h-12 rounded-full flex items-center justify-center"
+                  style={{ background: "rgba(37,99,235,0.08)" }}
+                >
+                  <Activity size={22} style={{ color: "#2563eb" }} />
+                </div>
+                <div>
+                  <div className="text-sm font-semibold mb-1" style={{ color: "var(--text-primary)" }}>
+                    No scan loaded
+                  </div>
+                  <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                    Load a dental scan from the panel on the left, or drag &amp; drop a file here
+                  </div>
+                </div>
+              </div>
             </div>
           )}
         </main>
+      </div>
 
-        {/* Right Sidebar */}
-        <aside
-          className="flex flex-col flex-shrink-0 transition-all duration-300 panel-shadow"
-          style={{
-            width: rightCollapsed ? "40px" : "260px",
-            background: "var(--bg-panel)",
-            borderLeft: "1px solid var(--border-subtle)",
-          }}
+      {/* ── Jaw picker modal (drag-and-drop from viewport) ─────────────────── */}
+      {showJawPicker && dropFile && (
+        <div
+          className="fixed inset-0 flex items-center justify-center"
+          style={{ background: "rgba(0,0,0,0.35)", zIndex: 50 }}
+          onClick={() => setShowJawPicker(false)}
         >
-          {rightCollapsed ? (
+          <div
+            className="flex flex-col gap-4 p-6 rounded-2xl"
+            style={{
+              background: "var(--bg-secondary)",
+              border: "1px solid var(--border-subtle)",
+              boxShadow: "0 20px 60px rgba(0,0,0,0.2)",
+              minWidth: "280px",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div>
+              <div className="text-sm font-bold mb-1" style={{ color: "var(--text-primary)" }}>
+                Assign Jaw
+              </div>
+              <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                {dropFile.name}
+              </div>
+            </div>
+            <div className="flex flex-col gap-2">
+              {(["maxilla", "mandible", "combined"] as const).map((jaw) => (
+                <button
+                  key={jaw}
+                  onClick={() => assignDropFile(jaw)}
+                  className="flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-all hover:bg-slate-50"
+                  style={{
+                    border: "1.5px solid var(--border-subtle)",
+                  }}
+                >
+                  <div
+                    className="w-3 h-3 rounded-full"
+                    style={{
+                      background:
+                        jaw === "maxilla"
+                          ? "#f59e0b"
+                          : jaw === "mandible"
+                          ? "#2563eb"
+                          : "#8b5cf6",
+                    }}
+                  />
+                  <div>
+                    <div className="text-sm font-medium" style={{ color: "var(--text-primary)" }}>
+                      {jaw === "maxilla"
+                        ? "Maxilla (Upper)"
+                        : jaw === "mandible"
+                        ? "Mandible (Lower)"
+                        : "Combined (Both)"}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
             <button
-              onClick={() => setRightCollapsed(false)}
-              className="flex items-center justify-center h-10 w-full hover:bg-slate-100"
+              onClick={() => setShowJawPicker(false)}
+              className="text-xs text-center py-1"
               style={{ color: "var(--text-muted)" }}
             >
-              <ChevronLeft size={16} />
+              Cancel
             </button>
-          ) : (
-            <>
-              {/* Header */}
-              <div
-                className="flex items-center justify-between px-3 py-2.5 border-b"
-                style={{ borderColor: "var(--border-subtle)" }}
-              >
-                <span className="text-xs font-semibold" style={{ color: "var(--text-secondary)" }}>
-                  BRACKET PROPERTIES
-                </span>
-                <button
-                  onClick={() => setRightCollapsed(true)}
-                  className="hover:bg-slate-100 rounded p-0.5"
-                  style={{ color: "var(--text-muted)" }}
-                >
-                  <ChevronRight size={14} />
-                </button>
-              </div>
+          </div>
+        </div>
+      )}
 
-              {/* Properties Content */}
-              <div className="flex-1 overflow-y-auto p-3">
-                <BracketProperties
-                  selectedTooth={selectedTooth}
-                  bracketData={selectedBracket}
-                  onUpdate={handleUpdateBracket}
-                  onRemove={handleRemoveBracket}
-                  onPlace={handlePlaceBracket}
-                  hasBracket={selectedTooth ? brackets.has(selectedTooth) : false}
-                />
-              </div>
-
-              {/* Bottom Quick Actions */}
-              <div
-                className="p-3 border-t"
-                style={{ borderColor: "var(--border-subtle)" }}
-              >
-                <div className="flex flex-col gap-2">
-                  <button
-                    className="w-full py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-all hover:bg-slate-100"
-                    style={{
-                      background: "var(--bg-card)",
-                      border: "1px solid var(--border-subtle)",
-                      color: "var(--text-secondary)",
-                    }}
-                    onClick={() => {
-                      const allTeeth = activeJaw === "upper"
-                        ? [11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27]
-                        : [41, 42, 43, 44, 45, 46, 47, 31, 32, 33, 34, 35, 36, 37];
-                      setBrackets((prev) => {
-                        const next = new Map(prev);
-                        allTeeth.forEach((id) => {
-                          if (!next.has(id)) {
-                            next.set(id, {
-                              toothId: id,
-                              torque: 0,
-                              angulation: 0,
-                              inOut: 0,
-                              system: "MBT 0.022\"",
-                              position: new THREE.Vector3(0, 0, 0),
-                            });
-                          }
-                        });
-                        return next;
-                      });
-                      showNotification("All brackets placed with MBT prescription");
-                    }}
-                  >
-                    <Zap size={11} />
-                    Auto-Place All
-                  </button>
-                  <button
-                    className="w-full py-2 rounded-lg text-xs font-medium flex items-center justify-center gap-1.5 transition-all"
-                    style={{
-                      background: "rgba(220, 38, 38, 0.06)",
-                      border: "1px solid rgba(220, 38, 38, 0.18)",
-                      color: "var(--accent-red)",
-                    }}
-                    onClick={() => {
-                      setBrackets(new Map());
-                      showNotification("All brackets cleared");
-                    }}
-                  >
-                    Clear All
-                  </button>
-                </div>
-              </div>
-            </>
-          )}
-        </aside>
-      </div>
+      {/* ── Notification toast ─────────────────────────────────────────────── */}
+      {notification && (
+        <div
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 px-4 py-2.5 rounded-xl text-sm font-medium"
+          style={{
+            background: "rgba(15,23,42,0.88)",
+            color: "#fff",
+            backdropFilter: "blur(8px)",
+            boxShadow: "0 4px 20px rgba(0,0,0,0.2)",
+            zIndex: 60,
+          }}
+        >
+          {notification}
+        </div>
+      )}
     </div>
   );
 }

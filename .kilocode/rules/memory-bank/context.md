@@ -43,12 +43,11 @@ The template is a clean Next.js 16 starter with TypeScript and Tailwind CSS 4. I
 
 ## Current Focus
 
-OrthoScan Pro — advanced bracket planning features implemented:
-- **Light clinical theme** (white/slate palette, bright 3D viewport)
-- **STL / OBJ / PLY import** via Three.js loaders + drag-and-drop on viewport
-- **Patient-specific bracket base** — curved pad geometry conforming to labial surface
-- **Ideal arch form slot alignment** — Bonwill-Hawley parabolic arch; bracket slots oriented tangent to arch curve (OCS alignment)
-- **Occlusal plane alignment** — `computeOCSMatrix()` derives WCS→OCS transform from 3 landmarks; OCS axes visualised in viewport; auto-detected on mesh import
+OrthoScan Pro — redesigned two-stage scan import workflow:
+- **Stage 1: Load Scan** — `ScanLoader` component with separate maxilla/mandible drop zones + combined scan mode; STL/OBJ/PLY support; drag-and-drop on viewport with jaw-assignment modal
+- **Stage 2: Occlusal Alignment** — `OcclusalAlignment` component with ICP registration pipeline (centroid → occlusal plane → ICP → verify); alignment metrics display
+- **Clean 3D viewport** — `ThreeViewer` now uses `OrbitControls`, renders only imported meshes (maxilla = warm ivory, mandible = cool blue-white); no placeholder teeth/brackets/archwire
+- **Imperative viewer API** — `ThreeViewerHandle` ref with `loadMesh`, `clearMesh`, `resetCamera`, `setWireframe`
 
 ## Quick Start Guide
 
