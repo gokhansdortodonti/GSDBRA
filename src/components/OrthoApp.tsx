@@ -10,14 +10,14 @@ import {
   User,
   Bell,
   Grid3x3,
-  Maximize2,
   RotateCcw,
   Eye,
   EyeOff,
+  Box,
 } from "lucide-react";
 import ScanLoader, { type ScanFile } from "./ScanLoader";
 import OcclusalAlignment from "./OcclusalAlignment";
-import type { ThreeViewerHandle } from "./ThreeViewer";
+import type { ThreeViewerHandle, OcclusalPlaneData, ViewPreset } from "./ThreeViewer";
 
 // Dynamic import — Three.js is client-side only
 const ThreeViewer = dynamic(() => import("./ThreeViewer"), { ssr: false });
@@ -38,8 +38,13 @@ export default function OrthoApp() {
   const [mandibleFile, setMandibleFile] = useState<ScanFile | null>(null);
   const [showGrid, setShowGrid] = useState(true);
   const [wireframe, setWireframe] = useState(false);
-  const [viewMode, setViewMode] = useState<"perspective" | "front" | "top" | "side">("perspective");
+  const [viewMode, setViewMode] = useState<ViewPreset>("perspective");
+  const [orthographic, setOrthographic] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
+
+  // Occlusal plane state (lifted from viewer)
+  const [landmarkCount, setLandmarkCount] = useState(0);
+  const [occlusalPlane, setOcclusalPlane] = useState<OcclusalPlaneData | null>(null);
 
   const viewerRef = useRef<ThreeViewerHandle>(null);
 
@@ -51,10 +56,9 @@ export default function OrthoApp() {
   // ── Load mesh into viewer whenever a file is set ──────────────────────────
   useEffect(() => {
     if (!maxillaFile || !viewerRef.current) return;
-    const jaw = maxillaFile.jaw === "combined" ? "maxilla" : "maxilla";
     viewerRef.current
-      .loadMesh(maxillaFile.file, jaw)
-      .then(() => notify(`${jaw === "maxilla" ? "Maxilla" : "Combined"} scan loaded`))
+      .loadMesh(maxillaFile.file, "maxilla")
+      .then(() => notify("Maxilla scan loaded"))
       .catch(() => notify("Failed to load scan"));
   }, [maxillaFile, notify]);
 
@@ -113,6 +117,36 @@ export default function OrthoApp() {
     setDropFile(null);
     setShowJawPicker(false);
   };
+
+  // ── Occlusal alignment callbacks ──────────────────────────────────────────
+  const handleStartPicking = useCallback(() => {
+    viewerRef.current?.setPickMode("landmark");
+    notify("Click 3 points on the maxilla to define the occlusal plane", 5000);
+  }, [notify]);
+
+  const handleClearLandmarks = useCallback(() => {
+    viewerRef.current?.clearLandmarks();
+    setLandmarkCount(0);
+    setOcclusalPlane(null);
+  }, []);
+
+  const handleSetGizmoMode = useCallback(
+    (mode: "translate" | "rotate") => {
+      viewerRef.current?.setGizmoMode(mode);
+      notify(`Gizmo: ${mode} mode`);
+    },
+    [notify]
+  );
+
+  const handleSetOrthographic = useCallback((v: boolean) => {
+    setOrthographic(v);
+    viewerRef.current?.setOrthographic(v);
+  }, []);
+
+  const handleSetView = useCallback((view: ViewPreset) => {
+    setViewMode(view);
+    viewerRef.current?.setView(view);
+  }, []);
 
   const stageIndex = STAGES.findIndex((s) => s.id === stage);
 
@@ -215,8 +249,9 @@ export default function OrthoApp() {
           </button>
           <button
             onClick={() => {
-              setWireframe((v) => !v);
-              viewerRef.current?.setWireframe(!wireframe);
+              const next = !wireframe;
+              setWireframe(next);
+              viewerRef.current?.setWireframe(next);
             }}
             className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-slate-100 transition-colors"
             style={{ color: wireframe ? "#2563eb" : "var(--text-muted)" }}
@@ -233,12 +268,15 @@ export default function OrthoApp() {
             <RotateCcw size={14} />
           </button>
           <button
-            onClick={() => setViewMode("top")}
+            onClick={() => {
+              const next = !orthographic;
+              handleSetOrthographic(next);
+            }}
             className="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-slate-100 transition-colors"
-            style={{ color: viewMode === "top" ? "#2563eb" : "var(--text-muted)" }}
-            title="Top view"
+            style={{ color: orthographic ? "#2563eb" : "var(--text-muted)" }}
+            title={orthographic ? "Switch to Perspective" : "Switch to Orthographic"}
           >
-            <Maximize2 size={14} />
+            <Box size={14} />
           </button>
 
           <div className="w-px h-5 mx-1" style={{ background: "var(--border-subtle)" }} />
@@ -292,6 +330,13 @@ export default function OrthoApp() {
                 setStage("plan");
               }}
               onBack={() => setStage("load")}
+              onStartPicking={handleStartPicking}
+              onClearLandmarks={handleClearLandmarks}
+              onSetGizmoMode={handleSetGizmoMode}
+              onSetOrthographic={handleSetOrthographic}
+              onSetView={handleSetView}
+              landmarkCount={landmarkCount}
+              occlusalPlane={occlusalPlane}
             />
           )}
 
@@ -321,8 +366,17 @@ export default function OrthoApp() {
             showGrid={showGrid}
             wireframe={wireframe}
             viewMode={viewMode}
+            orthographic={orthographic}
             onMeshLoaded={(jaw, name) => {
               notify(`${jaw === "maxilla" ? "Maxilla" : "Mandible"} loaded: ${name}`);
+            }}
+            onLandmarkPicked={(index) => {
+              setLandmarkCount(index + 1);
+            }}
+            onOcclusalPlaneDefined={(plane) => {
+              setOcclusalPlane(plane);
+              setLandmarkCount(3);
+              notify("Occlusal plane defined! Adjust with the gizmo if needed.");
             }}
           />
 
@@ -331,10 +385,10 @@ export default function OrthoApp() {
             className="absolute bottom-4 left-4 flex gap-1"
             style={{ zIndex: 10 }}
           >
-            {(["perspective", "front", "top", "side"] as const).map((m) => (
+            {(["perspective", "front", "top", "side", "bottom"] as const).map((m) => (
               <button
                 key={m}
-                onClick={() => setViewMode(m)}
+                onClick={() => handleSetView(m)}
                 className="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all"
                 style={{
                   background: viewMode === m ? "#2563eb" : "rgba(255,255,255,0.88)",
@@ -344,9 +398,23 @@ export default function OrthoApp() {
                   boxShadow: "0 2px 6px rgba(0,0,0,0.08)",
                 }}
               >
-                {m.charAt(0).toUpperCase() + m.slice(1)}
+                {m === "perspective" ? "3D" : m.charAt(0).toUpperCase() + m.slice(1)}
               </button>
             ))}
+          </div>
+
+          {/* Projection badge — floating top-right of viewport */}
+          <div
+            className="absolute top-3 right-3 px-2.5 py-1 rounded-lg text-xs font-medium"
+            style={{
+              background: orthographic ? "rgba(37,99,235,0.12)" : "rgba(255,255,255,0.75)",
+              color: orthographic ? "#2563eb" : "var(--text-muted)",
+              border: `1px solid ${orthographic ? "rgba(37,99,235,0.3)" : "var(--border-subtle)"}`,
+              backdropFilter: "blur(8px)",
+              zIndex: 10,
+            }}
+          >
+            {orthographic ? "Orthographic" : "Perspective"}
           </div>
 
           {/* Scan legend — floating bottom-right */}
@@ -358,6 +426,7 @@ export default function OrthoApp() {
                 border: "1px solid var(--border-subtle)",
                 backdropFilter: "blur(8px)",
                 boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
+                zIndex: 10,
               }}
             >
               {maxillaFile && (
@@ -372,6 +441,12 @@ export default function OrthoApp() {
                 <div className="flex items-center gap-2">
                   <div className="w-2.5 h-2.5 rounded-full" style={{ background: "#2563eb" }} />
                   <span style={{ color: "var(--text-secondary)" }}>Mandible</span>
+                </div>
+              )}
+              {occlusalPlane && (
+                <div className="flex items-center gap-2">
+                  <div className="w-2.5 h-2.5 rounded-full" style={{ background: "#2563eb", opacity: 0.5 }} />
+                  <span style={{ color: "var(--text-secondary)" }}>Occlusal Plane</span>
                 </div>
               )}
             </div>
@@ -443,9 +518,7 @@ export default function OrthoApp() {
                   key={jaw}
                   onClick={() => assignDropFile(jaw)}
                   className="flex items-center gap-3 px-4 py-3 rounded-xl text-left transition-all hover:bg-slate-50"
-                  style={{
-                    border: "1.5px solid var(--border-subtle)",
-                  }}
+                  style={{ border: "1.5px solid var(--border-subtle)" }}
                 >
                   <div
                     className="w-3 h-3 rounded-full"
