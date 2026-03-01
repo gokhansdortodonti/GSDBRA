@@ -14,23 +14,39 @@ The template is a clean Next.js 16 starter with TypeScript and Tailwind CSS 4. I
 - [x] ESLint configuration
 - [x] Memory bank documentation
 - [x] Recipe system for common features
+- [x] **OrthoScan Pro** — 3D orthodontic bracket placement UI
+  - Three.js 3D dental arch viewer with interactive tooth selection
+  - AI segmentation pipeline panel with animated step progress
+  - FDI tooth chart (upper/lower jaw) with bracket status indicators
+  - Bracket properties panel with MBT prescription values
+  - Torque/angulation/in-out fine adjustment sliders
+  - Floating viewer toolbar (3D/Front/Top/Side views, grid, wireframe)
+  - Bracket placement tools (select/place/move)
+  - Auto-place all brackets with prescription
+  - Archwire visualization when multiple brackets placed
+  - Modern dark theme (navy/blue/cyan) with collapsible sidebars
 
 ## Current Structure
 
 | File/Directory | Purpose | Status |
 |----------------|---------|--------|
-| `src/app/page.tsx` | Home page | ✅ Ready |
+| `src/app/page.tsx` | Renders OrthoApp | ✅ Ready |
 | `src/app/layout.tsx` | Root layout | ✅ Ready |
-| `src/app/globals.css` | Global styles | ✅ Ready |
+| `src/app/globals.css` | Dark theme + custom CSS vars | ✅ Ready |
+| `src/components/OrthoApp.tsx` | Main app shell + state | ✅ Ready |
+| `src/components/ThreeViewer.tsx` | Three.js 3D dental viewer | ✅ Ready |
+| `src/components/SegmentationPanel.tsx` | AI segmentation pipeline UI | ✅ Ready |
+| `src/components/ToothChart.tsx` | FDI tooth chart sidebar | ✅ Ready |
+| `src/components/BracketProperties.tsx` | Bracket adjustment panel | ✅ Ready |
+| `src/components/ViewerToolbar.tsx` | Floating viewer toolbar | ✅ Ready |
 | `.kilocode/` | AI context & recipes | ✅ Ready |
 
 ## Current Focus
 
-The template is ready. Next steps depend on user requirements:
-
-1. What type of application to build
-2. What features are needed
-3. Design/branding preferences
+OrthoScan Pro is fully implemented up to the segmentation stage. The UI includes:
+- Full 3D interactive dental arch visualization
+- AI segmentation workflow simulation
+- Bracket placement and fine-tuning tools
 
 ## Quick Start Guide
 
