@@ -43,10 +43,12 @@ The template is a clean Next.js 16 starter with TypeScript and Tailwind CSS 4. I
 
 ## Current Focus
 
-OrthoScan Pro is fully implemented up to the segmentation stage. The UI includes:
-- Full 3D interactive dental arch visualization
-- AI segmentation workflow simulation
-- Bracket placement and fine-tuning tools
+OrthoScan Pro — advanced bracket planning features implemented:
+- **Light clinical theme** (white/slate palette, bright 3D viewport)
+- **STL / OBJ / PLY import** via Three.js loaders + drag-and-drop on viewport
+- **Patient-specific bracket base** — curved pad geometry conforming to labial surface
+- **Ideal arch form slot alignment** — Bonwill-Hawley parabolic arch; bracket slots oriented tangent to arch curve (OCS alignment)
+- **Occlusal plane alignment** — `computeOCSMatrix()` derives WCS→OCS transform from 3 landmarks; OCS axes visualised in viewport; auto-detected on mesh import
 
 ## Quick Start Guide
 
