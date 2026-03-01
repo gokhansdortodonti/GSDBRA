@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Next.js Template",
-  description: "A minimal Next.js starter template",
+  title: "OrthoScan Pro — 3D Bracket Planning",
+  description: "AI-powered orthodontic bracket placement on 3D intraoral scans",
 };
 
 export default function RootLayout({
