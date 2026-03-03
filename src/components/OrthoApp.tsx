@@ -5,6 +5,7 @@ import dynamic from "next/dynamic";
 import {
   Activity,
   ChevronRight,
+  ChevronDown,
   Settings,
   HelpCircle,
   User,
@@ -22,6 +23,35 @@ import type { ThreeViewerHandle, OcclusalPlaneData, ViewPreset } from "./ThreeVi
 // Dynamic import — Three.js is client-side only
 const ThreeViewer = dynamic(() => import("./ThreeViewer"), { ssr: false });
 
+// ─── Arc shape options ────────────────────────────────────────────────────────
+const ARC_SHAPES = [
+  { value: "auto", label: "Auto selection" },
+  { value: "tapered", label: "Tapered (Daralan)" },
+  { value: "ovoid", label: "Ovoid (Oval)" },
+  { value: "square", label: "Square (Kare)" },
+  { value: "round", label: "Round (Yuvarlak)" },
+];
+
+// ─── Tooth SVG icon ───────────────────────────────────────────────────────────
+function ToothIcon({ color }: { color: string }) {
+  return (
+    <svg width="18" height="22" viewBox="0 0 18 22" fill="none">
+      <path
+        d="M9 1C6.5 1 4 3 4 5.5C4 7 4.5 8.5 5 10L6.5 20.5C6.7 21.3 7.2 21.5 7.8 21.5C8.4 21.5 8.8 21.1 9 20.5C9.2 21.1 9.6 21.5 10.2 21.5C10.8 21.5 11.3 21.3 11.5 20.5L13 10C13.5 8.5 14 7 14 5.5C14 3 11.5 1 9 1Z"
+        fill={color}
+        fillOpacity="0.75"
+      />
+      <path
+        d="M5.5 5C5.5 3.5 7 2.5 9 2.5C11 2.5 12.5 3.5 12.5 5"
+        stroke={color}
+        strokeWidth="1"
+        strokeOpacity="0.5"
+        fill="none"
+      />
+    </svg>
+  );
+}
+
 // ─── Workflow stages ──────────────────────────────────────────────────────────
 type Stage = "load" | "align" | "plan";
 
@@ -36,7 +66,7 @@ export default function OrthoApp() {
   const [stage, setStage] = useState<Stage>("load");
   const [maxillaFile, setMaxillaFile] = useState<ScanFile | null>(null);
   const [mandibleFile, setMandibleFile] = useState<ScanFile | null>(null);
-  const [showGrid, setShowGrid] = useState(true);
+  const [showGrid, setShowGrid] = useState(false);
   const [wireframe, setWireframe] = useState(false);
   const [viewMode, setViewMode] = useState<ViewPreset>("perspective");
   const [orthographic, setOrthographic] = useState(false);
@@ -47,6 +77,24 @@ export default function OrthoApp() {
   const [occlusalPlane, setOcclusalPlane] = useState<OcclusalPlaneData | null>(null);
 
   const viewerRef = useRef<ThreeViewerHandle>(null);
+
+  // Model visibility / opacity / color
+  const [maxillaVisible, setMaxillaVisible] = useState(true);
+  const [mandibleVisible, setMandibleVisible] = useState(true);
+  const [maxillaOpacity, setMaxillaOpacity] = useState(1);
+  const [mandibleOpacity, setMandibleOpacity] = useState(1);
+  const [maxillaColor, setMaxillaColor] = useState("#fff3e0");
+  const [mandibleColor, setMandibleColor] = useState("#e3f2fd");
+
+  // Scene lighting
+  const [sceneBrightness, setSceneBrightness] = useState(1);
+
+  // Bracket planning state
+  const [selectedJaw, setSelectedJaw] = useState<"maxilla" | "mandible" | "both">("maxilla");
+  const [startingJaw, setStartingJaw] = useState<"maxilla" | "mandible">("maxilla");
+  const [sameArcShape, setSameArcShape] = useState(false);
+  const [maxillaArcShape, setMaxillaArcShape] = useState("auto");
+  const [mandibleArcShape, setMandibleArcShape] = useState("auto");
 
   const notify = useCallback((msg: string, ms = 3000) => {
     setNotification(msg);
@@ -147,6 +195,29 @@ export default function OrthoApp() {
     setViewMode(view);
     viewerRef.current?.setView(view);
   }, []);
+
+  const handleUndoLandmark = useCallback(() => {
+    viewerRef.current?.undoLandmark();
+  }, []);
+
+  const handleSetGizmoAxis = useCallback(
+    (axis: "all" | "x" | "y" | "z") => {
+      viewerRef.current?.setGizmoAxis(axis);
+    },
+    []
+  );
+
+  // Auto-switch to top view when entering occlusal alignment stage
+  useEffect(() => {
+    if (stage === "align") {
+      // Small delay to ensure viewer is ready
+      const t = setTimeout(() => {
+        viewerRef.current?.setView("top");
+        setViewMode("top");
+      }, 150);
+      return () => clearTimeout(t);
+    }
+  }, [stage]);
 
   const stageIndex = STAGES.findIndex((s) => s.id === stage);
 
@@ -332,7 +403,9 @@ export default function OrthoApp() {
               onBack={() => setStage("load")}
               onStartPicking={handleStartPicking}
               onClearLandmarks={handleClearLandmarks}
+              onUndoLandmark={handleUndoLandmark}
               onSetGizmoMode={handleSetGizmoMode}
+              onSetGizmoAxis={handleSetGizmoAxis}
               onSetOrthographic={handleSetOrthographic}
               onSetView={handleSetView}
               landmarkCount={landmarkCount}
@@ -341,20 +414,216 @@ export default function OrthoApp() {
           )}
 
           {stage === "plan" && (
-            <div className="p-5 flex flex-col gap-4">
-              <div className="text-sm font-semibold" style={{ color: "var(--text-primary)" }}>
-                Bracket Planning
-              </div>
-              <div className="text-xs" style={{ color: "var(--text-muted)" }}>
-                Bracket planning tools will appear here.
-              </div>
-              <button
-                onClick={() => setStage("align")}
-                className="text-xs py-2 rounded-lg hover:bg-slate-100 transition-colors"
-                style={{ color: "var(--text-muted)", border: "1px solid var(--border-subtle)" }}
+            <div className="flex flex-col h-full">
+              {/* Panel header */}
+              <div
+                className="px-5 pt-5 pb-4 flex-shrink-0"
+                style={{ borderBottom: "1px solid var(--border-subtle)" }}
               >
-                ← Back to Alignment
-              </button>
+                <div className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
+                  Bracket Placement
+                </div>
+                <div className="text-xs mt-0.5" style={{ color: "var(--text-muted)" }}>
+                  Çeneleri seç
+                </div>
+              </div>
+
+              <div className="p-5 flex flex-col gap-5 overflow-y-auto flex-1">
+                {/* ── Jaw selection ────────────────────────── */}
+                <div className="flex flex-col gap-3">
+                  <div
+                    className="text-xs font-semibold tracking-wide"
+                    style={{ color: "var(--text-secondary)" }}
+                  >
+                    BRAKETLERİ ŞURAYA YERLEŞTİR
+                  </div>
+                  <div className="flex flex-col gap-2">
+                    {([
+                      { value: "maxilla", label: "Üst çene" },
+                      { value: "mandible", label: "Alt çene" },
+                      { value: "both", label: "Her iki çene" },
+                    ] as const).map((opt) => (
+                      <label
+                        key={opt.value}
+                        className="flex items-center gap-2.5 cursor-pointer"
+                        onClick={() => setSelectedJaw(opt.value)}
+                      >
+                        <div
+                          className="w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-all"
+                          style={{
+                            borderColor: selectedJaw === opt.value ? "#2563eb" : "var(--border-subtle)",
+                          }}
+                        >
+                          {selectedJaw === opt.value && (
+                            <div className="w-2 h-2 rounded-full" style={{ background: "#2563eb" }} />
+                          )}
+                        </div>
+                        <span
+                          className="text-xs"
+                          style={{
+                            color: selectedJaw === opt.value ? "var(--text-primary)" : "var(--text-secondary)",
+                            fontWeight: selectedJaw === opt.value ? 500 : 400,
+                          }}
+                        >
+                          {opt.label}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+
+                  {/* Sub-options when "both" is selected */}
+                  {selectedJaw === "both" && (
+                    <div
+                      className="ml-6 flex flex-col gap-1.5 pl-3"
+                      style={{ borderLeft: "2px solid var(--border-subtle)" }}
+                    >
+                      {([
+                        { value: "maxilla", label: "Üst çene ile başla" },
+                        { value: "mandible", label: "Alt çene ile başla" },
+                      ] as const).map((opt) => (
+                        <label
+                          key={opt.value}
+                          className="flex items-center gap-2 cursor-pointer"
+                          onClick={() => setStartingJaw(opt.value)}
+                        >
+                          <div
+                            className="w-3.5 h-3.5 rounded-full border-2 flex items-center justify-center flex-shrink-0 transition-all"
+                            style={{
+                              borderColor: startingJaw === opt.value ? "#7c3aed" : "var(--border-subtle)",
+                            }}
+                          >
+                            {startingJaw === opt.value && (
+                              <div className="w-1.5 h-1.5 rounded-full" style={{ background: "#7c3aed" }} />
+                            )}
+                          </div>
+                          <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+                            {opt.label}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Arc shape ────────────────────────────── */}
+                <div className="flex flex-col gap-3">
+                  <div
+                    className="text-xs font-semibold tracking-wide"
+                    style={{ color: "var(--text-secondary)" }}
+                  >
+                    ARC SHAPE
+                  </div>
+
+                  {/* Maxilla arc shape */}
+                  {(selectedJaw === "maxilla" || selectedJaw === "both") && (
+                    <div className="flex flex-col gap-1.5">
+                      <div className="text-xs" style={{ color: "var(--text-muted)" }}>
+                        Arch shape for Maxilla
+                      </div>
+                      <div className="relative">
+                        <select
+                          value={maxillaArcShape}
+                          onChange={(e) => {
+                            setMaxillaArcShape(e.target.value);
+                            if (sameArcShape) setMandibleArcShape(e.target.value);
+                          }}
+                          className="w-full appearance-none px-3 py-2 rounded-lg text-xs pr-8 outline-none"
+                          style={{
+                            background: "var(--bg-secondary)",
+                            border: "1px solid var(--border-subtle)",
+                            color: "var(--text-primary)",
+                          }}
+                        >
+                          {ARC_SHAPES.map((s) => (
+                            <option key={s.value} value={s.value}>{s.label}</option>
+                          ))}
+                        </select>
+                        <ChevronDown
+                          size={12}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                          style={{ color: "var(--text-muted)" }}
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Same arch shape checkbox — only shown when "both" */}
+                  {selectedJaw === "both" && (
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <div
+                        className="w-4 h-4 rounded flex items-center justify-center flex-shrink-0 transition-all"
+                        style={{
+                          background: sameArcShape ? "#2563eb" : "transparent",
+                          border: `1.5px solid ${sameArcShape ? "#2563eb" : "var(--border-subtle)"}`,
+                        }}
+                        onClick={() => {
+                          const next = !sameArcShape;
+                          setSameArcShape(next);
+                          if (next) setMandibleArcShape(maxillaArcShape);
+                        }}
+                      >
+                        {sameArcShape && (
+                          <svg width="9" height="7" viewBox="0 0 9 7" fill="none">
+                            <path d="M1 3.5L3.5 6 8 1" stroke="#fff" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        )}
+                      </div>
+                      <span className="text-xs" style={{ color: "var(--text-muted)" }}>
+                        Same arch shape for Antagonist
+                      </span>
+                    </label>
+                  )}
+
+                  {/* Mandible arc shape */}
+                  {(selectedJaw === "mandible" || selectedJaw === "both") && (
+                    <div className="flex flex-col gap-1.5">
+                      <div
+                        className="text-xs"
+                        style={{ color: sameArcShape ? "var(--text-muted)" : "var(--text-muted)", opacity: sameArcShape ? 0.5 : 1 }}
+                      >
+                        Arch shape for Mandible
+                      </div>
+                      <div className="relative" style={{ opacity: sameArcShape ? 0.5 : 1 }}>
+                        <select
+                          value={sameArcShape ? maxillaArcShape : mandibleArcShape}
+                          onChange={(e) => setMandibleArcShape(e.target.value)}
+                          disabled={sameArcShape}
+                          className="w-full appearance-none px-3 py-2 rounded-lg text-xs pr-8 outline-none"
+                          style={{
+                            background: "var(--bg-secondary)",
+                            border: "1px solid var(--border-subtle)",
+                            color: "var(--text-primary)",
+                          }}
+                        >
+                          {ARC_SHAPES.map((s) => (
+                            <option key={s.value} value={s.value}>{s.label}</option>
+                          ))}
+                        </select>
+                        <ChevronDown
+                          size={12}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                          style={{ color: "var(--text-muted)" }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* ── Back button ──────────────────────────── */}
+                <button
+                  onClick={() => setStage("align")}
+                  className="text-xs py-2 rounded-lg transition-colors"
+                  style={{
+                    color: "var(--text-muted)",
+                    border: "1px solid var(--border-subtle)",
+                    marginTop: "auto",
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(0,0,0,0.03)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                >
+                  ← Hizalamaya Geri Dön
+                </button>
+              </div>
             </div>
           )}
         </aside>
@@ -372,6 +641,10 @@ export default function OrthoApp() {
             }}
             onLandmarkPicked={(index) => {
               setLandmarkCount(index + 1);
+            }}
+            onLandmarkUndone={(newCount) => {
+              setLandmarkCount(newCount);
+              if (newCount < 3) setOcclusalPlane(null);
             }}
             onOcclusalPlaneDefined={(plane) => {
               setOcclusalPlane(plane);
@@ -417,8 +690,8 @@ export default function OrthoApp() {
             {orthographic ? "Orthographic" : "Perspective"}
           </div>
 
-          {/* Scan legend — floating bottom-right */}
-          {(maxillaFile || mandibleFile) && (
+          {/* Scan legend — floating bottom-right — hidden; moved to right panel */}
+          {false && (maxillaFile || mandibleFile) && (
             <div
               className="absolute bottom-4 right-4 flex flex-col gap-1.5 px-3 py-2.5 rounded-xl text-xs"
               style={{
@@ -485,6 +758,260 @@ export default function OrthoApp() {
             </div>
           )}
         </main>
+
+        {/* ── Right panel — Model visibility ─────────────────────────────── */}
+        <aside
+          className="flex-shrink-0 flex flex-col overflow-y-auto"
+          style={{
+            width: "208px",
+            background: "var(--bg-panel)",
+            borderLeft: "1px solid var(--border-subtle)",
+            boxShadow: "-2px 0 8px rgba(0,0,0,0.04)",
+          }}
+        >
+          <div className="px-4 pt-4 pb-2 flex-shrink-0" style={{ borderBottom: "1px solid var(--border-subtle)" }}>
+            <div className="text-xs font-semibold tracking-wide" style={{ color: "var(--text-secondary)" }}>
+              MODELLER
+            </div>
+          </div>
+
+          <div className="p-4 flex flex-col gap-4 flex-1">
+            {/* Maxilla */}
+            {maxillaFile ? (
+              <div className="flex flex-col gap-2.5">
+                <div className="flex items-center gap-2.5">
+                  {/* Icon */}
+                  <div
+                    className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+                    style={{
+                      background: "linear-gradient(135deg, #fff3e0, #ffe0b2)",
+                      border: "1.5px solid rgba(245,158,11,0.3)",
+                    }}
+                  >
+                    <ToothIcon color="#f59e0b" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <div className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>Maxilla</div>
+                      {/* Color picker */}
+                      <label className="cursor-pointer flex-shrink-0" title="Renk seç">
+                        <div
+                          className="w-4 h-4 rounded border"
+                          style={{ background: maxillaColor, borderColor: "rgba(0,0,0,0.18)" }}
+                        />
+                        <input
+                          type="color"
+                          value={maxillaColor}
+                          onChange={(e) => {
+                            setMaxillaColor(e.target.value);
+                            viewerRef.current?.setMeshColor("maxilla", e.target.value);
+                          }}
+                          className="sr-only"
+                        />
+                      </label>
+                    </div>
+                    <div className="text-xs truncate" style={{ color: "var(--text-muted)" }}>Üst çene</div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const next = !maxillaVisible;
+                      setMaxillaVisible(next);
+                      viewerRef.current?.setMeshVisible("maxilla", next);
+                    }}
+                    className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors flex-shrink-0"
+                    style={{
+                      color: maxillaVisible ? "#f59e0b" : "var(--text-muted)",
+                      background: maxillaVisible ? "rgba(245,158,11,0.1)" : "transparent",
+                      border: "1px solid " + (maxillaVisible ? "rgba(245,158,11,0.3)" : "var(--border-subtle)"),
+                    }}
+                    title={maxillaVisible ? "Gizle" : "Göster"}
+                  >
+                    {maxillaVisible ? <Eye size={13} /> : <EyeOff size={13} />}
+                  </button>
+                </div>
+                {/* Opacity slider */}
+                <div
+                  className="flex items-center gap-2 px-1"
+                  style={{ opacity: maxillaVisible ? 1 : 0.35, transition: "opacity 0.2s" }}
+                >
+                  <div
+                    className="w-2 h-2 rounded-full flex-shrink-0"
+                    style={{ background: "#f59e0b", opacity: maxillaOpacity }}
+                  />
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={Math.round(maxillaOpacity * 100)}
+                    disabled={!maxillaVisible}
+                    onChange={(e) => {
+                      const o = Number(e.target.value) / 100;
+                      setMaxillaOpacity(o);
+                      viewerRef.current?.setMeshOpacity("maxilla", o);
+                    }}
+                    className="flex-1 h-1 cursor-pointer"
+                    style={{ accentColor: "#f59e0b" }}
+                  />
+                  <span className="text-xs w-7 text-right flex-shrink-0" style={{ color: "var(--text-muted)", fontSize: "10px" }}>
+                    {Math.round(maxillaOpacity * 100)}%
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div
+                className="flex flex-col items-center gap-1.5 py-3 rounded-lg"
+                style={{ background: "var(--bg-secondary)", border: "1px dashed var(--border-subtle)" }}
+              >
+                <ToothIcon color="#94a3b8" />
+                <div className="text-xs" style={{ color: "var(--text-muted)" }}>Maxilla yok</div>
+              </div>
+            )}
+
+            {/* Divider */}
+            <div style={{ height: "1px", background: "var(--border-subtle)" }} />
+
+            {/* Mandible */}
+            {mandibleFile ? (
+              <div className="flex flex-col gap-2.5">
+                <div className="flex items-center gap-2.5">
+                  <div
+                    className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+                    style={{
+                      background: "linear-gradient(135deg, #e3f2fd, #bbdefb)",
+                      border: "1.5px solid rgba(37,99,235,0.25)",
+                    }}
+                  >
+                    <ToothIcon color="#2563eb" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <div className="text-xs font-semibold" style={{ color: "var(--text-primary)" }}>Mandible</div>
+                      {/* Color picker */}
+                      <label className="cursor-pointer flex-shrink-0" title="Renk seç">
+                        <div
+                          className="w-4 h-4 rounded border"
+                          style={{ background: mandibleColor, borderColor: "rgba(0,0,0,0.18)" }}
+                        />
+                        <input
+                          type="color"
+                          value={mandibleColor}
+                          onChange={(e) => {
+                            setMandibleColor(e.target.value);
+                            viewerRef.current?.setMeshColor("mandible", e.target.value);
+                          }}
+                          className="sr-only"
+                        />
+                      </label>
+                    </div>
+                    <div className="text-xs truncate" style={{ color: "var(--text-muted)" }}>Alt çene</div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      const next = !mandibleVisible;
+                      setMandibleVisible(next);
+                      viewerRef.current?.setMeshVisible("mandible", next);
+                    }}
+                    className="w-7 h-7 rounded-lg flex items-center justify-center transition-colors flex-shrink-0"
+                    style={{
+                      color: mandibleVisible ? "#2563eb" : "var(--text-muted)",
+                      background: mandibleVisible ? "rgba(37,99,235,0.08)" : "transparent",
+                      border: "1px solid " + (mandibleVisible ? "rgba(37,99,235,0.25)" : "var(--border-subtle)"),
+                    }}
+                    title={mandibleVisible ? "Gizle" : "Göster"}
+                  >
+                    {mandibleVisible ? <Eye size={13} /> : <EyeOff size={13} />}
+                  </button>
+                </div>
+                <div
+                  className="flex items-center gap-2 px-1"
+                  style={{ opacity: mandibleVisible ? 1 : 0.35, transition: "opacity 0.2s" }}
+                >
+                  <div
+                    className="w-2 h-2 rounded-full flex-shrink-0"
+                    style={{ background: "#2563eb", opacity: mandibleOpacity }}
+                  />
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={Math.round(mandibleOpacity * 100)}
+                    disabled={!mandibleVisible}
+                    onChange={(e) => {
+                      const o = Number(e.target.value) / 100;
+                      setMandibleOpacity(o);
+                      viewerRef.current?.setMeshOpacity("mandible", o);
+                    }}
+                    className="flex-1 h-1 cursor-pointer"
+                    style={{ accentColor: "#2563eb" }}
+                  />
+                  <span className="text-xs w-7 text-right flex-shrink-0" style={{ color: "var(--text-muted)", fontSize: "10px" }}>
+                    {Math.round(mandibleOpacity * 100)}%
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div
+                className="flex flex-col items-center gap-1.5 py-3 rounded-lg"
+                style={{ background: "var(--bg-secondary)", border: "1px dashed var(--border-subtle)" }}
+              >
+                <ToothIcon color="#94a3b8" />
+                <div className="text-xs" style={{ color: "var(--text-muted)" }}>Mandible yok</div>
+              </div>
+            )}
+
+            {/* Lighting controls */}
+            <div
+              className="flex flex-col gap-2 pt-3"
+              style={{ borderTop: "1px solid var(--border-subtle)" }}
+            >
+              <div className="text-xs font-semibold tracking-wide" style={{ color: "var(--text-secondary)" }}>
+                IŞIK AYARLARI
+              </div>
+              <div className="flex items-center gap-2">
+                <span style={{ color: "var(--text-muted)", fontSize: "13px" }}>☀</span>
+                <input
+                  type="range"
+                  min={20}
+                  max={200}
+                  step={5}
+                  value={Math.round(sceneBrightness * 100)}
+                  onChange={(e) => {
+                    const v = Number(e.target.value) / 100;
+                    setSceneBrightness(v);
+                    viewerRef.current?.setSceneBrightness(v);
+                  }}
+                  className="flex-1 h-1 cursor-pointer"
+                  style={{ accentColor: "#f59e0b" }}
+                />
+                <span className="text-xs w-7 text-right flex-shrink-0" style={{ color: "var(--text-muted)", fontSize: "10px" }}>
+                  {Math.round(sceneBrightness * 100)}%
+                </span>
+              </div>
+            </div>
+
+            {/* Mouse controls hint */}
+            <div
+              className="mt-auto pt-3 flex flex-col gap-1"
+              style={{ borderTop: "1px solid var(--border-subtle)" }}
+            >
+              <div className="text-xs font-semibold tracking-wide mb-1" style={{ color: "var(--text-secondary)" }}>
+                KONTROLLER
+              </div>
+              {[
+                { icon: "◎", label: "Sol tık — Döndür" },
+                { icon: "⊕", label: "Tekerlek — Zoom" },
+                { icon: "⊗", label: "Orta tuş — Kaydır" },
+              ].map((c) => (
+                <div key={c.label} className="flex items-center gap-2">
+                  <span className="text-xs w-4 text-center flex-shrink-0" style={{ color: "var(--text-muted)" }}>{c.icon}</span>
+                  <span className="text-xs" style={{ color: "var(--text-muted)", fontSize: "10px" }}>{c.label}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </aside>
       </div>
 
       {/* ── Jaw picker modal (drag-and-drop from viewport) ─────────────────── */}

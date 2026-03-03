@@ -27,7 +27,9 @@ interface OcclusalAlignmentProps {
   // Viewer control callbacks
   onStartPicking: () => void;
   onClearLandmarks: () => void;
+  onUndoLandmark: () => void;
   onSetGizmoMode: (mode: "translate" | "rotate") => void;
+  onSetGizmoAxis: (axis: "all" | "x" | "y" | "z") => void;
   onSetOrthographic: (v: boolean) => void;
   onSetView: (view: "perspective" | "front" | "top" | "side" | "bottom") => void;
   // State from viewer
@@ -153,7 +155,9 @@ export default function OcclusalAlignment({
   onBack,
   onStartPicking,
   onClearLandmarks,
+  onUndoLandmark,
   onSetGizmoMode,
+  onSetGizmoAxis,
   onSetOrthographic,
   onSetView,
   landmarkCount,
@@ -165,7 +169,8 @@ export default function OcclusalAlignment({
   const [showDetails, setShowDetails] = useState<string | null>(null);
   const [isOrtho, setIsOrtho] = useState(false);
   const [gizmoMode, setGizmoModeState] = useState<"translate" | "rotate">("rotate");
-  const [activeView, setActiveView] = useState<"perspective" | "front" | "top" | "side" | "bottom">("perspective");
+  const [gizmoAxis, setGizmoAxisState] = useState<"all" | "x" | "y" | "z">("all");
+  const [activeView, setActiveView] = useState<"perspective" | "front" | "top" | "side" | "bottom">("top");
 
   const [metrics] = useState({
     rmsError: "0.08",
@@ -244,6 +249,14 @@ export default function OcclusalAlignment({
       onSetGizmoMode(mode);
     },
     [onSetGizmoMode]
+  );
+
+  const handleGizmoAxis = useCallback(
+    (axis: "all" | "x" | "y" | "z") => {
+      setGizmoAxisState(axis);
+      onSetGizmoAxis(axis);
+    },
+    [onSetGizmoAxis]
   );
 
   // Format plane normal for display
@@ -448,15 +461,33 @@ export default function OcclusalAlignment({
             >
               Define Occlusal Plane
             </span>
-            {planeDefined && (
-              <button
-                onClick={onClearLandmarks}
-                className="ml-auto p-1 rounded-md hover:bg-red-50 transition-colors"
-                title="Clear landmarks"
-              >
-                <Trash2 size={11} style={{ color: "#ef4444" }} />
-              </button>
-            )}
+            <div className="ml-auto flex items-center gap-1">
+              {landmarkCount > 0 && (
+                <button
+                  onClick={onUndoLandmark}
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium transition-colors"
+                  style={{
+                    background: "rgba(245,158,11,0.1)",
+                    color: "#f59e0b",
+                    border: "1px solid rgba(245,158,11,0.25)",
+                  }}
+                  title="Undo last landmark"
+                >
+                  <RotateCcw size={10} />
+                  Geri Al
+                </button>
+              )}
+              {landmarkCount > 0 && (
+                <button
+                  onClick={onClearLandmarks}
+                  className="p-1 rounded-md transition-colors"
+                  style={{ color: "#ef4444" }}
+                  title="Clear all landmarks"
+                >
+                  <Trash2 size={11} />
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="p-3 flex flex-col gap-3">
@@ -614,7 +645,8 @@ export default function OcclusalAlignment({
               </span>
             </div>
 
-            <div className="p-3 flex flex-col gap-2">
+            <div className="p-3 flex flex-col gap-2.5">
+              {/* Gizmo mode */}
               <div className="flex items-center justify-between">
                 <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
                   Gizmo Mode
@@ -638,6 +670,52 @@ export default function OcclusalAlignment({
                   ))}
                 </div>
               </div>
+
+              {/* Axis lock — only relevant for rotate mode */}
+              {gizmoMode === "rotate" && (
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                    Eksen Kilidi
+                  </span>
+                  <div className="grid grid-cols-4 gap-1">
+                    {(
+                      [
+                        { axis: "all" as const, label: "Serbest", color: "#7c3aed" },
+                        { axis: "x" as const, label: "Sagital X", color: "#ef4444" },
+                        { axis: "y" as const, label: "Dikey Y", color: "#22c55e" },
+                        { axis: "z" as const, label: "Koronal Z", color: "#3b82f6" },
+                      ]
+                    ).map(({ axis, label, color }) => (
+                      <button
+                        key={axis}
+                        onClick={() => handleGizmoAxis(axis)}
+                        className="flex flex-col items-center gap-0.5 py-1.5 px-1 rounded-lg text-xs font-medium transition-all"
+                        style={{
+                          background:
+                            gizmoAxis === axis
+                              ? `${color}22`
+                              : "var(--bg-card)",
+                          color: gizmoAxis === axis ? color : "var(--text-muted)",
+                          border: `1.5px solid ${
+                            gizmoAxis === axis ? color : "var(--border-subtle)"
+                          }`,
+                        }}
+                      >
+                        <span
+                          className="w-3 h-3 rounded-full flex-shrink-0"
+                          style={{
+                            background: gizmoAxis === axis ? color : "var(--border-subtle)",
+                          }}
+                        />
+                        <span style={{ fontSize: "8px", lineHeight: 1.2, textAlign: "center" }}>
+                          {label}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div
                 className="text-xs p-2 rounded-lg"
                 style={{
@@ -646,8 +724,7 @@ export default function OcclusalAlignment({
                   border: "1px solid rgba(124,58,237,0.15)",
                 }}
               >
-                Drag the gizmo handles in the 3D viewport to fine-tune the
-                occlusal plane orientation.
+                Gizmo handles to fine-tune the plane. Drag placed points to reposition them.
               </div>
             </div>
           </div>

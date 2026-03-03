@@ -33,6 +33,12 @@ export interface ThreeViewerHandle {
   getOcclusalPlane: () => OcclusalPlaneData | null;
   setView: (view: ViewPreset) => void;
   setGizmoMode: (mode: "translate" | "rotate") => void;
+  setMeshVisible: (jaw: "maxilla" | "mandible", visible: boolean) => void;
+  setMeshOpacity: (jaw: "maxilla" | "mandible", opacity: number) => void;
+  setMeshColor: (jaw: "maxilla" | "mandible", hex: string) => void;
+  setSceneBrightness: (value: number) => void;
+  undoLandmark: () => void;
+  setGizmoAxis: (axis: "all" | "x" | "y" | "z") => void;
 }
 
 export type PickMode = "none" | "landmark";
@@ -41,6 +47,7 @@ export type ViewPreset = "perspective" | "front" | "top" | "side" | "bottom";
 interface ThreeViewerProps {
   onMeshLoaded?: (jaw: "maxilla" | "mandible", fileName: string) => void;
   onLandmarkPicked?: (index: number, point: THREE.Vector3) => void;
+  onLandmarkUndone?: (newCount: number) => void;
   onOcclusalPlaneDefined?: (plane: OcclusalPlaneData) => void;
   showGrid?: boolean;
   wireframe?: boolean;
@@ -54,6 +61,7 @@ const MANDIBLE_COLOR = 0xe3f2fd;
 const LANDMARK_COLORS = [0xff4444, 0x44ff44, 0x4488ff]; // R molar, L molar, midline
 const LANDMARK_LABELS = ["R Molar", "L Molar", "11|21"];
 const PLANE_COLOR = 0x2563eb;
+const CLICK_THRESHOLD_PX = 6;
 
 // ─── Load geometry from file ──────────────────────────────────────────────────
 function loadGeometry(file: File): Promise<THREE.BufferGeometry> {
@@ -64,17 +72,8 @@ function loadGeometry(file: File): Promise<THREE.BufferGeometry> {
     const finish = (geom: THREE.BufferGeometry) => {
       URL.revokeObjectURL(url);
       geom.computeVertexNormals();
-      geom.center();
-      const box = new THREE.Box3().setFromBufferAttribute(
-        geom.attributes.position as THREE.BufferAttribute
-      );
-      const size = new THREE.Vector3();
-      box.getSize(size);
-      const maxDim = Math.max(size.x, size.y, size.z);
-      if (maxDim > 0) {
-        const s = 10 / maxDim;
-        geom.scale(s, s, s);
-      }
+      // Preserve original scanner coordinates — scaling applied uniformly
+      // in loadMesh so that bite relationship between maxilla/mandible is intact
       resolve(geom);
     };
 
@@ -197,8 +196,9 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
     {
       onMeshLoaded,
       onLandmarkPicked,
+      onLandmarkUndone,
       onOcclusalPlaneDefined,
-      showGrid = true,
+      showGrid = false,
       wireframe = false,
       viewMode = "perspective",
       orthographic = false,
@@ -226,7 +226,18 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
     const normalArrowRef = useRef<THREE.ArrowHelper | null>(null);
     const occlusalDataRef = useRef<OcclusalPlaneData | null>(null);
 
+    // Pointer state for drag detection and sphere dragging
+    const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
+    const draggingSphereRef = useRef<{ sphere: THREE.Mesh; index: number } | null>(null);
+
     const isOrthoRef = useRef(false);
+
+    // Scene-level scale factor (same for all models to preserve bite relationship)
+    const scaleFactorRef = useRef<number | null>(null);
+
+    // Light refs for brightness control
+    const ambientLightRef = useRef<THREE.AmbientLight | null>(null);
+    const dirLight1Ref = useRef<THREE.DirectionalLight | null>(null);
 
     const [isDragOver, setIsDragOver] = useState(false);
     const [pickMode, setPickModeState] = useState<PickMode>("none");
@@ -291,22 +302,83 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       cam.updateProjectionMatrix();
     }, []);
 
+    // ── Rebuild occlusal plane from current landmarks ─────────────────────────
+    const rebuildPlane = useCallback(
+      (silent = false) => {
+        const scene = sceneRef.current;
+        if (!scene || landmarksRef.current.length < 3) return;
+
+        const [p0, p1, p2] = landmarksRef.current as [
+          THREE.Vector3,
+          THREE.Vector3,
+          THREE.Vector3
+        ];
+        const { planeMesh, normalArrow, center, normal } = buildOcclusalPlane(
+          p0,
+          p1,
+          p2
+        );
+
+        if (occlusalPlaneRef.current) scene.remove(occlusalPlaneRef.current);
+        if (normalArrowRef.current) scene.remove(normalArrowRef.current);
+
+        scene.add(planeMesh);
+        scene.add(normalArrow);
+        occlusalPlaneRef.current = planeMesh;
+        normalArrowRef.current = normalArrow;
+
+        const tc = transformRef.current;
+        if (tc) {
+          tc.attach(planeMesh);
+          tc.camera = getCamera();
+        }
+
+        const planeData: OcclusalPlaneData = {
+          normal,
+          center,
+          landmarks: [p0, p1, p2],
+        };
+        occlusalDataRef.current = planeData;
+
+        if (!silent) {
+          onOcclusalPlaneDefined?.(planeData);
+        }
+      },
+      [getCamera, onOcclusalPlaneDefined]
+    );
+
     // ── Imperative handle ─────────────────────────────────────────────────────
     useImperativeHandle(ref, () => ({
       loadMesh: async (file: File, jaw: "maxilla" | "mandible") => {
         const geom = await loadGeometry(file);
+
+        // Compute scene-level scale from first loaded model; reuse for all
+        // subsequent models so relative positions (bite) are preserved
+        if (scaleFactorRef.current === null) {
+          const box = new THREE.Box3().setFromBufferAttribute(
+            geom.attributes.position as THREE.BufferAttribute
+          );
+          const size = new THREE.Vector3();
+          box.getSize(size);
+          const maxDim = Math.max(size.x, size.y, size.z);
+          scaleFactorRef.current = maxDim > 0 ? 10 / maxDim : 1;
+        }
+        geom.scale(scaleFactorRef.current, scaleFactorRef.current, scaleFactorRef.current);
+
         const color = jaw === "maxilla" ? MAXILLA_COLOR : MANDIBLE_COLOR;
         const mat = new THREE.MeshPhysicalMaterial({
           color,
           roughness: 0.28,
           metalness: 0.0,
+          clearcoat: 0.55,
+          clearcoatRoughness: 0.15,
           side: THREE.DoubleSide,
           wireframe,
         });
         const mesh = new THREE.Mesh(geom, mat);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
-        if (jaw === "mandible") mesh.position.y = -1.5;
+        // No position offset — scanner coordinates determine jaw positions
 
         const scene = sceneRef.current;
         if (!scene) return;
@@ -326,6 +398,9 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
           scene.remove(meshRef.current);
           meshRef.current = null;
         }
+        // Reset scene scale when no models remain so next import is re-calibrated
+        const otherRef = jaw === "maxilla" ? mandibleMeshRef : maxillaMeshRef;
+        if (!otherRef.current) scaleFactorRef.current = null;
       },
 
       resetCamera: () => fitCamera(),
@@ -352,8 +427,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       setPickMode: (mode: PickMode) => {
         pickModeRef.current = mode;
         setPickModeState(mode);
-        const controls = controlsRef.current;
-        if (controls) controls.enabled = mode === "none";
+        // Orbit controls remain enabled — user can orbit while placing landmarks
       },
 
       clearLandmarks: () => {
@@ -377,11 +451,80 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
         setLandmarkCount(0);
       },
 
+      undoLandmark: () => {
+        const scene = sceneRef.current;
+        if (!scene || landmarksRef.current.length === 0) return;
+
+        // Remove last sphere
+        const sphere = landmarkSpheresRef.current.pop();
+        if (sphere) scene.remove(sphere);
+        landmarksRef.current.pop();
+
+        const newCount = landmarksRef.current.length;
+
+        // If we previously had 3 and now have 2, remove plane and re-enter pick mode
+        if (newCount < 3) {
+          if (occlusalPlaneRef.current) {
+            scene.remove(occlusalPlaneRef.current);
+            occlusalPlaneRef.current = null;
+          }
+          if (normalArrowRef.current) {
+            scene.remove(normalArrowRef.current);
+            normalArrowRef.current = null;
+          }
+          const tc = transformRef.current;
+          if (tc) tc.detach();
+          occlusalDataRef.current = null;
+          // Re-enable picking
+          pickModeRef.current = "landmark";
+          setPickModeState("landmark");
+        }
+
+        setLandmarkCount(newCount);
+        onLandmarkUndone?.(newCount);
+      },
+
       getOcclusalPlane: () => occlusalDataRef.current,
 
       setGizmoMode: (mode: "translate" | "rotate") => {
         const tc = transformRef.current;
         if (tc) tc.setMode(mode);
+      },
+
+      setGizmoAxis: (axis: "all" | "x" | "y" | "z") => {
+        const tc = transformRef.current;
+        if (!tc) return;
+        tc.showX = axis === "all" || axis === "x";
+        tc.showY = axis === "all" || axis === "y";
+        tc.showZ = axis === "all" || axis === "z";
+      },
+
+      setMeshVisible: (jaw: "maxilla" | "mandible", visible: boolean) => {
+        const meshRef = jaw === "maxilla" ? maxillaMeshRef : mandibleMeshRef;
+        if (meshRef.current) meshRef.current.visible = visible;
+      },
+
+      setMeshOpacity: (jaw: "maxilla" | "mandible", opacity: number) => {
+        const meshRef = jaw === "maxilla" ? maxillaMeshRef : mandibleMeshRef;
+        if (!meshRef.current) return;
+        const mat = meshRef.current.material as THREE.MeshPhysicalMaterial;
+        mat.transparent = opacity < 1;
+        mat.opacity = opacity;
+        mat.depthWrite = opacity >= 1;
+        mat.needsUpdate = true;
+      },
+
+      setMeshColor: (jaw: "maxilla" | "mandible", hex: string) => {
+        const meshRef = jaw === "maxilla" ? maxillaMeshRef : mandibleMeshRef;
+        if (!meshRef.current) return;
+        const mat = meshRef.current.material as THREE.MeshPhysicalMaterial;
+        mat.color.setStyle(hex);
+        mat.needsUpdate = true;
+      },
+
+      setSceneBrightness: (value: number) => {
+        if (ambientLightRef.current) ambientLightRef.current.intensity = 1.6 * value;
+        if (dirLight1Ref.current)    dirLight1Ref.current.intensity   = 2.2 * value;
       },
 
       setView: (view: ViewPreset) => {
@@ -396,10 +539,10 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
         const center = box.isEmpty()
           ? new THREE.Vector3()
           : (() => {
-              const c = new THREE.Vector3();
-              box.getCenter(c);
-              return c;
-            })();
+            const c = new THREE.Vector3();
+            box.getCenter(c);
+            return c;
+          })();
         const dist = 18;
 
         switch (view) {
@@ -408,14 +551,17 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
             break;
           case "top":
             cam.position.set(center.x, center.y + dist, center.z);
+            cam.up.set(0, 0, -1);
             break;
           case "bottom":
             cam.position.set(center.x, center.y - dist, center.z);
+            cam.up.set(0, 0, 1);
             break;
           case "side":
             cam.position.set(center.x + dist, center.y, center.z);
             break;
           default:
+            cam.up.set(0, 1, 0);
             cam.position.set(center.x, center.y + dist * 0.4, center.z + dist);
         }
         controls.target.copy(center);
@@ -453,10 +599,10 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       const center = box.isEmpty()
         ? new THREE.Vector3()
         : (() => {
-            const c = new THREE.Vector3();
-            box.getCenter(c);
-            return c;
-          })();
+          const c = new THREE.Vector3();
+          box.getCenter(c);
+          return c;
+        })();
       const dist = 18;
 
       switch (viewMode) {
@@ -465,14 +611,17 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
           break;
         case "top":
           cam.position.set(center.x, center.y + dist, center.z);
+          cam.up.set(0, 0, -1);
           break;
         case "bottom":
           cam.position.set(center.x, center.y - dist, center.z);
+          cam.up.set(0, 0, 1);
           break;
         case "side":
           cam.position.set(center.x + dist, center.y, center.z);
           break;
         default:
+          cam.up.set(0, 1, 0);
           cam.position.set(center.x, center.y + dist * 0.4, center.z + dist);
       }
       controls.target.copy(center);
@@ -527,9 +676,10 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       renderer.setSize(w, h);
       renderer.setPixelRatio(window.devicePixelRatio);
       renderer.shadowMap.enabled = true;
-      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.1;
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       rendererRef.current = renderer;
       mountRef.current.appendChild(renderer.domElement);
 
@@ -539,6 +689,12 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       controls.dampingFactor = 0.08;
       controls.minDistance = 1;
       controls.maxDistance = 120;
+      // Left drag = rotate, wheel = zoom, middle drag = pan
+      controls.mouseButtons = {
+        LEFT: THREE.MOUSE.ROTATE,
+        MIDDLE: THREE.MOUSE.PAN,
+        RIGHT: THREE.MOUSE.PAN,
+      };
       controlsRef.current = controls;
 
       // TransformControls for occlusal plane
@@ -566,14 +722,26 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
           normalArrowRef.current.setDirection(newNormal);
         }
       });
-      scene.add(tc as unknown as THREE.Object3D);
+      scene.add(tc.getHelper());
       transformRef.current = tc;
 
       // Lighting
-      scene.add(new THREE.AmbientLight(0xffffff, 1.6));
+      const ambient = new THREE.AmbientLight(0xffffff, 1.6);
+      ambientLightRef.current = ambient;
+      scene.add(ambient);
       const dir1 = new THREE.DirectionalLight(0xffffff, 2.2);
+      dirLight1Ref.current = dir1;
       dir1.position.set(6, 14, 10);
       dir1.castShadow = true;
+      dir1.shadow.mapSize.width = 2048;
+      dir1.shadow.mapSize.height = 2048;
+      dir1.shadow.camera.near = 0.5;
+      dir1.shadow.camera.far = 100;
+      dir1.shadow.camera.left = -15;
+      dir1.shadow.camera.right = 15;
+      dir1.shadow.camera.top = 15;
+      dir1.shadow.camera.bottom = -15;
+      dir1.shadow.bias = -0.0005;
       scene.add(dir1);
       const dir2 = new THREE.DirectionalLight(0xd0e8ff, 1.0);
       dir2.position.set(-8, 6, -6);
@@ -582,7 +750,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       fill.position.set(0, -6, 10);
       scene.add(fill);
 
-      // Grid
+      // Grid (off by default)
       if (showGrid) {
         const g = new THREE.GridHelper(30, 30, 0xb0bec5, 0xdde3ea);
         g.position.y = -6;
@@ -629,26 +797,119 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // ── Landmark picking (click handler) ─────────────────────────────────────
-    const handleClick = useCallback(
-      (e: React.MouseEvent<HTMLDivElement>) => {
+    // ── Pointer: down — record position & check sphere drag ──────────────────
+    const handlePointerDown = useCallback(
+      (e: React.PointerEvent<HTMLDivElement>) => {
         if (pickModeRef.current !== "landmark") return;
-        if (landmarksRef.current.length >= 3) return;
+
+        pointerDownPosRef.current = { x: e.clientX, y: e.clientY };
 
         const mount = mountRef.current;
-        const renderer = rendererRef.current;
-        const scene = sceneRef.current;
-        const maxillaMesh = maxillaMeshRef.current;
-        if (!mount || !renderer || !scene || !maxillaMesh) return;
-
+        if (!mount) return;
         const rect = mount.getBoundingClientRect();
-        const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-        const y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        const ny = -((e.clientY - rect.top) / rect.height) * 2 + 1;
 
         const raycaster = new THREE.Raycaster();
-        raycaster.setFromCamera(new THREE.Vector2(x, y), getCamera());
+        raycaster.setFromCamera(new THREE.Vector2(nx, ny), getCamera());
 
-        const hits = raycaster.intersectObject(maxillaMesh, false);
+        // Check if clicking on an existing landmark sphere
+        const sphereHits = raycaster.intersectObjects(
+          landmarkSpheresRef.current,
+          false
+        );
+        if (sphereHits.length > 0) {
+          const hitSphere = sphereHits[0].object as THREE.Mesh;
+          const idx = landmarkSpheresRef.current.indexOf(hitSphere);
+          if (idx >= 0) {
+            draggingSphereRef.current = { sphere: hitSphere, index: idx };
+            // Disable orbit so only we handle this pointer
+            if (controlsRef.current) controlsRef.current.enabled = false;
+            mount.setPointerCapture(e.pointerId);
+          }
+        }
+      },
+      [getCamera]
+    );
+
+    // ── Pointer: move — drag sphere along mesh surface ────────────────────────
+    const handlePointerMove = useCallback(
+      (e: React.PointerEvent<HTMLDivElement>) => {
+        if (!draggingSphereRef.current) return;
+
+        const mount = mountRef.current;
+        if (!mount) return;
+        const rect = mount.getBoundingClientRect();
+        const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        const ny = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(new THREE.Vector2(nx, ny), getCamera());
+
+        const meshes = [maxillaMeshRef.current, mandibleMeshRef.current].filter(
+          Boolean
+        ) as THREE.Mesh[];
+        const hits = raycaster.intersectObjects(meshes, false);
+
+        if (hits.length > 0) {
+          const { sphere, index } = draggingSphereRef.current;
+          const newPos = hits[0].point.clone();
+          sphere.position.copy(newPos);
+          landmarksRef.current[index] = newPos;
+
+          // Live plane update during drag (silent — don't notify parent yet)
+          if (landmarksRef.current.length === 3) {
+            rebuildPlane(true);
+          }
+        }
+      },
+      [getCamera, rebuildPlane]
+    );
+
+    // ── Pointer: up — release drag or place new landmark ─────────────────────
+    const handlePointerUp = useCallback(
+      (e: React.PointerEvent<HTMLDivElement>) => {
+        // Finish sphere drag
+        if (draggingSphereRef.current) {
+          draggingSphereRef.current = null;
+          if (controlsRef.current) controlsRef.current.enabled = true;
+          try {
+            (mountRef.current as HTMLDivElement).releasePointerCapture(e.pointerId);
+          } catch {}
+          // Notify parent of updated plane after drag ends
+          if (landmarksRef.current.length === 3 && occlusalDataRef.current) {
+            onOcclusalPlaneDefined?.(occlusalDataRef.current);
+          }
+          pointerDownPosRef.current = null;
+          return;
+        }
+
+        // Check if this was a short click (not an orbit drag)
+        const downPos = pointerDownPosRef.current;
+        pointerDownPosRef.current = null;
+
+        if (!downPos || pickModeRef.current !== "landmark") return;
+        if (landmarksRef.current.length >= 3) return;
+
+        const dx = e.clientX - downPos.x;
+        const dy = e.clientY - downPos.y;
+        if (Math.sqrt(dx * dx + dy * dy) > CLICK_THRESHOLD_PX) return; // Was an orbit drag
+
+        // Place new landmark
+        const mount = mountRef.current;
+        const scene = sceneRef.current;
+        if (!mount || !scene) return;
+        const rect = mount.getBoundingClientRect();
+        const nx = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        const ny = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(new THREE.Vector2(nx, ny), getCamera());
+
+        const meshes = [maxillaMeshRef.current, mandibleMeshRef.current].filter(
+          Boolean
+        ) as THREE.Mesh[];
+        const hits = raycaster.intersectObjects(meshes, false);
         if (hits.length === 0) return;
 
         const point = hits[0].point.clone();
@@ -667,49 +928,12 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
 
         // When 3 landmarks are picked, build the occlusal plane
         if (newCount === 3) {
-          const [p0, p1, p2] = landmarksRef.current as [
-            THREE.Vector3,
-            THREE.Vector3,
-            THREE.Vector3
-          ];
-          const { planeMesh, normalArrow, center, normal } = buildOcclusalPlane(
-            p0,
-            p1,
-            p2
-          );
-
-          // Remove old plane if any
-          if (occlusalPlaneRef.current) scene.remove(occlusalPlaneRef.current);
-          if (normalArrowRef.current) scene.remove(normalArrowRef.current);
-
-          scene.add(planeMesh);
-          scene.add(normalArrow);
-          occlusalPlaneRef.current = planeMesh;
-          normalArrowRef.current = normalArrow;
-
-          // Attach TransformControls to the plane
-          const tc = transformRef.current;
-          if (tc) {
-            tc.attach(planeMesh);
-            // Update camera reference for TC
-            tc.camera = getCamera();
-          }
-
-          const planeData: OcclusalPlaneData = {
-            normal,
-            center,
-            landmarks: [p0, p1, p2],
-          };
-          occlusalDataRef.current = planeData;
-          onOcclusalPlaneDefined?.(planeData);
-
-          // Exit pick mode, re-enable orbit
+          rebuildPlane(false); // notify parent
           pickModeRef.current = "none";
           setPickModeState("none");
-          if (controlsRef.current) controlsRef.current.enabled = true;
         }
       },
-      [getCamera, onLandmarkPicked, onOcclusalPlaneDefined]
+      [getCamera, onLandmarkPicked, onOcclusalPlaneDefined, rebuildPlane]
     );
 
     // ── Drag-and-drop ─────────────────────────────────────────────────────────
@@ -744,7 +968,9 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
-          onClick={handleClick}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
         />
 
         {/* Pick mode overlay instructions */}
@@ -764,8 +990,9 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
                 <span className="font-bold">
                   {landmarkCount + 1}/3
                 </span>{" "}
-                — Click on maxilla:{" "}
+                — Click on scan:{" "}
                 <span className="font-bold">{LANDMARK_LABELS[landmarkCount]}</span>
+                <span className="ml-2 opacity-70 text-xs">· Orbit freely</span>
               </>
             ) : (
               "All 3 landmarks placed"
