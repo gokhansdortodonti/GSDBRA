@@ -14,12 +14,36 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
+import { computeAutoOcclusalPlane as runAutoPlane, type AutoPlaneResult } from "./autoOcclusalPlane";
+// Tooth segmentation integration
+import { segmentTeeth, createToothGroup } from "../core/ToothSegmenter";
+import { createAllTeethVisualization, setLCSVisibility } from "./ToothVisualization";
+import { downloadTeethJSON, exportAllTeethToJSON } from "../utils/toothExport";
+import type { ToothEntity, ToothExportJSON } from "../core/types";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 export interface OcclusalPlaneData {
   normal: THREE.Vector3;
   center: THREE.Vector3;
-  landmarks: [THREE.Vector3, THREE.Vector3, THREE.Vector3];
+  landmarks?: [THREE.Vector3, THREE.Vector3, THREE.Vector3];
+}
+
+export interface AlignmentBasis {
+  X: THREE.Vector3; // right
+  Y: THREE.Vector3; // front (anterior)
+  Z: THREE.Vector3; // up (occlusal normal)
+  center: THREE.Vector3;
+}
+
+export interface LandmarkPoint {
+  class: string;
+  coord: [number, number, number];
+  score: number;
+}
+
+export interface SegmentationResult {
+  labels: number[];
+  landmarks: LandmarkPoint[];
 }
 
 export interface ThreeViewerHandle {
@@ -39,29 +63,93 @@ export interface ThreeViewerHandle {
   setSceneBrightness: (value: number) => void;
   undoLandmark: () => void;
   setGizmoAxis: (axis: "all" | "x" | "y" | "z") => void;
+  applySegmentation: (result: SegmentationResult, jaw: "maxilla" | "mandible") => void;
+  clearSegmentation: () => void;
+  detachGizmo: () => void;
+  // ── Tooth entity access ─────────────────────────────────────────────────────
+  getToothEntities: () => Map<number, ToothEntity>;
+  exportTeethJSON: () => ToothExportJSON[];
+  downloadTeethJSON: (filename?: string) => void;
+  setLCSVisible: (visible: boolean) => void;
+  getTooth: (toothId: number) => ToothEntity | undefined;
+  transformTooth: (toothId: number, matrix: THREE.Matrix4) => void;
+  // ── Occlusal alignment ──────────────────────────────────────────────────────
+  computeAutoOcclusalPlane: () => AutoPlaneResult | null;
+  setAnteriorPickMode: () => void;
+  applyFullAlignment: (anteriorPoint: THREE.Vector3) => AlignmentBasis | null;
+  applyOcclusalAlignment: (plane: OcclusalPlaneData) => void;
+  saveAlignmentMatrix: () => THREE.Matrix4;
+  resetAlignment: () => void;
+  getAlignmentBasis: () => AlignmentBasis | null;
+  // ── Post-alignment flip corrections ──────────────────────────────────────────
+  flipAlignmentNormal: () => void;
+  flipAlignmentX: () => void;
+  flipFrontBack: () => void;
 }
 
-export type PickMode = "none" | "landmark";
-export type ViewPreset = "perspective" | "front" | "top" | "side" | "bottom";
+export type PickMode = "none" | "landmark" | "anteriorPick";
+export type ViewPreset = "perspective" | "front" | "back" | "top" | "sideLeft" | "sideRight" | "bottom";
 
 interface ThreeViewerProps {
   onMeshLoaded?: (jaw: "maxilla" | "mandible", fileName: string) => void;
+  onAnteriorPicked?: (point: THREE.Vector3) => void;
   onLandmarkPicked?: (index: number, point: THREE.Vector3) => void;
   onLandmarkUndone?: (newCount: number) => void;
   onOcclusalPlaneDefined?: (plane: OcclusalPlaneData) => void;
+  onPickError?: (message: string) => void;   // collinear points, etc.
+  onSetView?: (view: ViewPreset) => void;
   showGrid?: boolean;
   wireframe?: boolean;
   viewMode?: ViewPreset;
   orthographic?: boolean;
 }
 
+// ─── ViewCube face material helper ───────────────────────────────────────────
+function makeViewCubeFaceMat(label: string, bg: string): THREE.MeshBasicMaterial {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = bg;
+  ctx.roundRect(0, 0, 64, 64, 8);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.3)";
+  ctx.lineWidth = 2;
+  ctx.roundRect(2, 2, 60, 60, 6);
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "bold 13px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, 32, 32);
+  return new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(canvas) });
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 const MAXILLA_COLOR = 0xfff3e0;
 const MANDIBLE_COLOR = 0xe3f2fd;
-const LANDMARK_COLORS = [0xff4444, 0x44ff44, 0x4488ff]; // R molar, L molar, midline
-const LANDMARK_LABELS = ["R Molar", "L Molar", "11|21"];
+const LANDMARK_COLORS = [0x44ff44, 0xff4444, 0x4488ff]; // L molar (green), R molar (red), anterior (blue)
+const LANDMARK_LABELS = ["L Molar", "R Molar", "Anterior"];
 const PLANE_COLOR = 0x2563eb;
 const CLICK_THRESHOLD_PX = 6;
+
+// Per-tooth color palette (20 distinct colors for FDI teeth)
+const TOOTH_PALETTE: number[] = [
+  0xe63946, 0xf4a261, 0xe9c46a, 0x2a9d8f, 0x457b9d,
+  0x6a4c93, 0x1982c4, 0xff595e, 0xffca3a, 0x8ac926,
+  0xff924c, 0x52b788, 0x4361ee, 0xf72585, 0x7209b7,
+  0x3a86ff, 0x06d6a0, 0xef233c, 0xfca311, 0x9b2226,
+];
+
+// Landmark class → sphere color
+const SEGMENTATION_LM_COLORS: Record<string, number> = {
+  FacialPoint: 0x16a34a,
+  Cusp: 0xeab308,
+  Mesial: 0xff4444,
+  Distal: 0x4488ff,
+  OuterPoint: 0xf97316,
+  InnerPoint: 0x9333ea,
+};
 
 // ─── Load geometry from file ──────────────────────────────────────────────────
 function loadGeometry(file: File): Promise<THREE.BufferGeometry> {
@@ -177,6 +265,56 @@ function buildOcclusalPlane(
   return { planeMesh, normalArrow, center, normal };
 }
 
+// ─── Build single plane visualization from normal + center ────────────────────
+function buildSinglePlaneVis(
+  normal: THREE.Vector3,
+  center: THREE.Vector3,
+  size = 20
+): { planeMesh: THREE.Mesh; normalArrow: THREE.ArrowHelper } {
+  const planeGeom = new THREE.PlaneGeometry(size, size, 8, 8);
+  const planeMat = new THREE.MeshBasicMaterial({
+    color: PLANE_COLOR,
+    transparent: true,
+    opacity: 0.18,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const planeMesh = new THREE.Mesh(planeGeom, planeMat);
+
+  // Orient plane so its local +Z matches the plane normal
+  const quaternion = new THREE.Quaternion().setFromUnitVectors(
+    new THREE.Vector3(0, 0, 1),
+    normal.clone().normalize()
+  );
+  planeMesh.quaternion.copy(quaternion);
+  planeMesh.position.copy(center);
+
+  // Wireframe overlay
+  const wireGeom = new THREE.PlaneGeometry(size, size, 4, 4);
+  const wireMat = new THREE.MeshBasicMaterial({
+    color: PLANE_COLOR,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.35,
+  });
+  const wireMesh = new THREE.Mesh(wireGeom, wireMat);
+  wireMesh.quaternion.copy(quaternion);
+  wireMesh.position.copy(center);
+  planeMesh.add(wireMesh);
+
+  // Normal arrow
+  const normalArrow = new THREE.ArrowHelper(
+    normal.clone().normalize(),
+    center,
+    size * 0.25,
+    0xfbbf24,
+    size * 0.06,
+    size * 0.04
+  );
+
+  return { planeMesh, normalArrow };
+}
+
 // ─── Landmark sphere ──────────────────────────────────────────────────────────
 function makeLandmarkSphere(color: number, radius = 0.18): THREE.Mesh {
   const geom = new THREE.SphereGeometry(radius, 16, 16);
@@ -195,9 +333,12 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
   function ThreeViewer(
     {
       onMeshLoaded,
+      onAnteriorPicked,
       onLandmarkPicked,
       onLandmarkUndone,
       onOcclusalPlaneDefined,
+      onPickError,
+      onSetView,
       showGrid = false,
       wireframe = false,
       viewMode = "perspective",
@@ -217,6 +358,19 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
     const maxillaMeshRef = useRef<THREE.Mesh | null>(null);
     const mandibleMeshRef = useRef<THREE.Mesh | null>(null);
     const gridRef = useRef<THREE.GridHelper | null>(null);
+    // Pivot group — both jaw meshes are children of this group so they
+    // can be transformed together as a single rigid body.
+    const pivotGroupRef = useRef<THREE.Group | null>(null);
+    // Whether the occlusal alignment has been applied to the pivot group
+    const alignmentAppliedRef = useRef(false);
+    // Orthonormal basis built from plane normal + anterior point
+    const alignmentBasisRef = useRef<AlignmentBasis | null>(null);
+
+    // ─── ViewCube refs ────────────────────────────────────────────────────────
+    const cubeSceneRef = useRef<THREE.Scene | null>(null);
+    const cubeCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+    const cubeGroupRef = useRef<THREE.Group | null>(null);
+    const cubeBoxMeshRef = useRef<THREE.Mesh | null>(null);
 
     // Landmark picking state
     const pickModeRef = useRef<PickMode>("none");
@@ -225,6 +379,12 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
     const occlusalPlaneRef = useRef<THREE.Mesh | null>(null);
     const normalArrowRef = useRef<THREE.ArrowHelper | null>(null);
     const occlusalDataRef = useRef<OcclusalPlaneData | null>(null);
+
+    // Segmentation landmark spheres (per jaw, so clearing one jaw doesn't remove the other)
+    const segSpheresRef = useRef<{ maxilla: THREE.Mesh[]; mandible: THREE.Mesh[] }>({
+      maxilla: [],
+      mandible: [],
+    });
 
     // Pointer state for drag detection and sphere dragging
     const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
@@ -238,6 +398,11 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
     // Light refs for brightness control
     const ambientLightRef = useRef<THREE.AmbientLight | null>(null);
     const dirLight1Ref = useRef<THREE.DirectionalLight | null>(null);
+
+    // Segmentation state
+    const teethEntitiesRef = useRef<Map<number, ToothEntity>>(new Map());
+    const teethVizRef = useRef<THREE.Group | null>(null);
+    const showLCSRef = useRef<boolean>(false);
 
     const [isDragOver, setIsDragOver] = useState(false);
     const [pickMode, setPickModeState] = useState<PickMode>("none");
@@ -255,10 +420,18 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       const controls = controlsRef.current;
       if (!controls) return;
 
+      // Ensure transforms are current before computing bounds
+      pivotGroupRef.current?.updateMatrixWorld(true);
+
       const box = new THREE.Box3();
-      [maxillaMeshRef, mandibleMeshRef].forEach((r) => {
-        if (r.current) box.expandByObject(r.current);
-      });
+      // Use pivot group if it has been set up, otherwise individual meshes
+      if (pivotGroupRef.current) {
+        box.expandByObject(pivotGroupRef.current);
+      } else {
+        [maxillaMeshRef, mandibleMeshRef].forEach((r) => {
+          if (r.current) box.expandByObject(r.current);
+        });
+      }
 
       let center = new THREE.Vector3();
       let dist = 18;
@@ -290,6 +463,16 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       controls.update();
     }, [getCamera]);
 
+    // ── Set backface culling for both jaw meshes ───────────────────────────
+    const setJawCulling = useCallback((frontOnly: boolean) => {
+      [maxillaMeshRef, mandibleMeshRef].forEach((r) => {
+        if (!r.current) return;
+        const mat = r.current.material as THREE.MeshPhysicalMaterial;
+        mat.side = frontOnly ? THREE.FrontSide : THREE.DoubleSide;
+        mat.needsUpdate = true;
+      });
+    }, []);
+
     // ── Sync ortho camera frustum on resize ───────────────────────────────────
     const syncOrthoFrustum = useCallback(() => {
       const cam = orthoCameraRef.current;
@@ -300,6 +483,175 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       cam.left = -half * aspect;
       cam.right = half * aspect;
       cam.updateProjectionMatrix();
+    }, []);
+
+    // ── setView extracted for reuse (ViewCube + imperative handle) ────────────
+    const setViewCallback = useCallback((view: ViewPreset) => {
+      const controls = controlsRef.current;
+      const cam = getCamera();
+      if (!controls || !cam) return;
+
+      pivotGroupRef.current?.updateMatrixWorld(true);
+
+      const box = new THREE.Box3();
+      if (pivotGroupRef.current) {
+        box.expandByObject(pivotGroupRef.current);
+      } else {
+        [maxillaMeshRef, mandibleMeshRef].forEach((r) => {
+          if (r.current) box.expandByObject(r.current);
+        });
+      }
+
+      const center = box.isEmpty()
+        ? new THREE.Vector3()
+        : (() => { const c = new THREE.Vector3(); box.getCenter(c); return c; })();
+
+      const size = new THREE.Vector3();
+      if (!box.isEmpty()) box.getSize(size);
+      const maxDim = Math.max(size.x, size.y, size.z);
+      const dist = Math.max(maxDim * 1.5, 18);
+
+      if (cam instanceof THREE.PerspectiveCamera) {
+        cam.near = 0.1;
+        cam.updateProjectionMatrix();
+      }
+
+      const basis = alignmentBasisRef.current;
+
+      if (basis) {
+        // ── Basis-aware camera presets ──────────────────────────────────────
+        const bCenter = center; // use bounding center for camera target
+        let dir: THREE.Vector3;
+        let up: THREE.Vector3;
+        let cull = false;
+
+        switch (view) {
+          case "front":
+            dir = basis.Y.clone();
+            up = basis.Z.clone();
+            break;
+          case "back":
+            dir = basis.Y.clone().negate();
+            up = basis.Z.clone();
+            break;
+          case "sideLeft":
+            dir = basis.X.clone().negate();
+            up = basis.Z.clone();
+            break;
+          case "sideRight":
+            dir = basis.X.clone();
+            up = basis.Z.clone();
+            break;
+          case "top":
+            dir = basis.Z.clone();
+            up = basis.Y.clone().negate();
+            cull = true;
+            break;
+          case "bottom":
+            dir = basis.Z.clone().negate();
+            up = basis.Y.clone();
+            cull = true;
+            break;
+          default: // perspective
+            dir = new THREE.Vector3()
+              .addScaledVector(basis.Y, 0.7)
+              .addScaledVector(basis.Z, 0.4)
+              .normalize();
+            up = basis.Z.clone();
+            break;
+        }
+
+        setJawCulling(cull);
+        cam.up.copy(up);
+        cam.position.copy(bCenter).addScaledVector(dir, dist);
+        controls.target.copy(bCenter);
+        cam.lookAt(bCenter);
+      } else {
+        // ── Fallback: no basis yet — use world axes ──────────────────────────
+        switch (view) {
+          case "front":
+            setJawCulling(false);
+            cam.up.set(0, 1, 0);
+            cam.position.set(center.x, center.y, center.z + dist);
+            break;
+          case "back":
+            setJawCulling(false);
+            cam.up.set(0, 1, 0);
+            cam.position.set(center.x, center.y, center.z - dist);
+            break;
+          case "top": {
+            const clearance = Math.max(dist * 0.55, 2);
+            const camY = box.isEmpty() ? dist : box.max.y + clearance;
+            cam.up.set(0, 0, -1);
+            cam.position.set(center.x, camY, center.z);
+            setJawCulling(true);
+            break;
+          }
+          case "bottom": {
+            const clearance = Math.max(dist * 0.55, 2);
+            const camY = box.isEmpty() ? -dist : box.min.y - clearance;
+            cam.up.set(0, 0, 1);
+            cam.position.set(center.x, camY, center.z);
+            setJawCulling(true);
+            break;
+          }
+          case "sideLeft":
+            setJawCulling(false);
+            cam.up.set(0, 1, 0);
+            cam.position.set(center.x - dist, center.y, center.z);
+            break;
+          case "sideRight":
+            setJawCulling(false);
+            cam.up.set(0, 1, 0);
+            cam.position.set(center.x + dist, center.y, center.z);
+            break;
+          default:
+            setJawCulling(false);
+            cam.up.set(0, 1, 0);
+            cam.position.set(center.x, center.y + dist * 0.4, center.z + dist);
+        }
+        controls.target.copy(center);
+      }
+
+      if (cam instanceof THREE.OrthographicCamera) syncOrthoFrustum();
+      controls.update();
+      onSetView?.(view);
+    }, [getCamera, setJawCulling, syncOrthoFrustum, onSetView]);
+
+    // ── ViewCube click detection ──────────────────────────────────────────────
+    const VCUBE_CSS = 96;
+    const VCUBE_MARGIN = 10;
+
+    const checkViewCubeClick = useCallback((clientX: number, clientY: number): ViewPreset | null => {
+      const mount = mountRef.current;
+      if (!mount || !cubeBoxMeshRef.current || !cubeCameraRef.current) return null;
+      const rect = mount.getBoundingClientRect();
+      const cx = clientX - rect.left;
+      const cy = clientY - rect.top;
+      const W = rect.width;
+      const cubeLeft = W - VCUBE_CSS - VCUBE_MARGIN;
+      const cubeTop = VCUBE_MARGIN;
+      const cubeRight = W - VCUBE_MARGIN;
+      const cubeBottom = VCUBE_MARGIN + VCUBE_CSS;
+      if (cx < cubeLeft || cx > cubeRight || cy < cubeTop || cy > cubeBottom) return null;
+      const nx = ((cx - cubeLeft) / VCUBE_CSS) * 2 - 1;
+      const ny = -((cy - cubeTop) / VCUBE_CSS) * 2 + 1;
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(new THREE.Vector2(nx, ny), cubeCameraRef.current);
+      cubeGroupRef.current?.updateMatrixWorld(true);
+      const hits = raycaster.intersectObject(cubeBoxMeshRef.current, false);
+      if (hits.length === 0) return null;
+      const matIdx = hits[0].face?.materialIndex ?? -1;
+      // BoxGeometry face order: +X=0, -X=1, +Y=2, -Y=3, +Z=4, -Z=5
+      const MAP: Record<number, ViewPreset> = {
+        0: "sideRight",  // +X right
+        1: "sideLeft",   // -X left
+        2: "top",        // +Y top
+        3: "bottom",     // -Y bottom
+        4: "front",      // +Z front
+        5: "back",       // -Z back
+      };
+      return MAP[matIdx] ?? null;
     }, []);
 
     // ── Rebuild occlusal plane from current landmarks ─────────────────────────
@@ -313,6 +665,16 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
           THREE.Vector3,
           THREE.Vector3
         ];
+
+        // ── Collinearity guard ────────────────────────────────────────────────
+        const _v1 = new THREE.Vector3().subVectors(p1, p0);
+        const _v2 = new THREE.Vector3().subVectors(p2, p0);
+        const crossLen = new THREE.Vector3().crossVectors(_v1, _v2).length();
+        if (crossLen < 0.01) {
+          onPickError?.("3 nokta neredeyse aynı doğrultuda — düzlem tanımlanamıyor. Lütfen tekrar seçin.");
+          return;
+        }
+
         const { planeMesh, normalArrow, center, normal } = buildOcclusalPlane(
           p0,
           p1,
@@ -344,7 +706,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
           onOcclusalPlaneDefined?.(planeData);
         }
       },
-      [getCamera, onOcclusalPlaneDefined]
+      [getCamera, onOcclusalPlaneDefined, onPickError]
     );
 
     // ── Imperative handle ─────────────────────────────────────────────────────
@@ -378,29 +740,38 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
         const mesh = new THREE.Mesh(geom, mat);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
-        // No position offset — scanner coordinates determine jaw positions
 
         const scene = sceneRef.current;
         if (!scene) return;
 
+        // Ensure pivot group exists in scene
+        if (!pivotGroupRef.current) {
+          const g = new THREE.Group();
+          pivotGroupRef.current = g;
+          scene.add(g);
+        }
+        const pivotGroup = pivotGroupRef.current;
+
         const meshRef = jaw === "maxilla" ? maxillaMeshRef : mandibleMeshRef;
-        if (meshRef.current) scene.remove(meshRef.current);
+        if (meshRef.current) pivotGroup.remove(meshRef.current);
         meshRef.current = mesh;
-        scene.add(mesh);
+        pivotGroup.add(mesh);
         fitCamera();
         onMeshLoaded?.(jaw, file.name);
       },
 
       clearMesh: (jaw: "maxilla" | "mandible") => {
-        const scene = sceneRef.current;
         const meshRef = jaw === "maxilla" ? maxillaMeshRef : mandibleMeshRef;
-        if (scene && meshRef.current) {
-          scene.remove(meshRef.current);
+        if (meshRef.current && pivotGroupRef.current) {
+          pivotGroupRef.current.remove(meshRef.current);
           meshRef.current = null;
         }
         // Reset scene scale when no models remain so next import is re-calibrated
         const otherRef = jaw === "maxilla" ? mandibleMeshRef : maxillaMeshRef;
-        if (!otherRef.current) scaleFactorRef.current = null;
+        if (!otherRef.current) {
+          scaleFactorRef.current = null;
+          alignmentAppliedRef.current = false;
+        }
       },
 
       resetCamera: () => fitCamera(),
@@ -524,49 +895,323 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
 
       setSceneBrightness: (value: number) => {
         if (ambientLightRef.current) ambientLightRef.current.intensity = 1.6 * value;
-        if (dirLight1Ref.current)    dirLight1Ref.current.intensity   = 2.2 * value;
+        if (dirLight1Ref.current) dirLight1Ref.current.intensity = 2.2 * value;
       },
 
-      setView: (view: ViewPreset) => {
-        const controls = controlsRef.current;
-        const cam = getCamera();
-        if (!controls || !cam) return;
+      setView: setViewCallback,
 
-        const box = new THREE.Box3();
-        [maxillaMeshRef, mandibleMeshRef].forEach((r) => {
-          if (r.current) box.expandByObject(r.current);
-        });
-        const center = box.isEmpty()
-          ? new THREE.Vector3()
-          : (() => {
-            const c = new THREE.Vector3();
-            box.getCenter(c);
-            return c;
-          })();
-        const dist = 18;
+      // ── Tooth segmentation ────────────────────────────────────────────────
+      applySegmentation: (result: SegmentationResult, jaw: "maxilla" | "mandible") => {
+        const mesh = jaw === "maxilla" ? maxillaMeshRef.current : mandibleMeshRef.current;
+        if (!mesh) return;
 
-        switch (view) {
-          case "front":
-            cam.position.set(center.x, center.y, center.z + dist);
-            break;
-          case "top":
-            cam.position.set(center.x, center.y + dist, center.z);
-            cam.up.set(0, 0, -1);
-            break;
-          case "bottom":
-            cam.position.set(center.x, center.y - dist, center.z);
-            cam.up.set(0, 0, 1);
-            break;
-          case "side":
-            cam.position.set(center.x + dist, center.y, center.z);
-            break;
-          default:
-            cam.up.set(0, 1, 0);
-            cam.position.set(center.x, center.y + dist * 0.4, center.z + dist);
+        // Remove old segmentation visualization
+        if (teethVizRef.current) {
+          sceneRef.current?.remove(teethVizRef.current);
+          teethVizRef.current = null;
         }
-        controls.target.copy(center);
-        if (cam instanceof THREE.OrthographicCamera) syncOrthoFrustum();
-        controls.update();
+
+        // Segment teeth and create entities
+        const teeth = segmentTeeth(mesh.geometry, result, jaw);
+        teethEntitiesRef.current = teeth;
+
+        // Create visualization
+        const vizGroup = createAllTeethVisualization(teeth, showLCSRef.current);
+        vizGroup.name = `teeth_viz_${jaw}`;
+        teethVizRef.current = vizGroup;
+
+        // Hide original mesh
+        mesh.visible = false;
+
+        // Add to scene
+        sceneRef.current?.add(vizGroup);
+
+        // Fit camera to new geometry
+        fitCamera();
+
+        console.log(`[Seg] ${jaw}: Segmented ${teeth.size} teeth with LCS visualization`);
+      },
+
+      clearSegmentation: () => {
+        const scene = sceneRef.current;
+        if (!scene) return;
+
+        // Remove teeth visualization group
+        if (teethVizRef.current) {
+          scene.remove(teethVizRef.current);
+          teethVizRef.current = null;
+        }
+
+        // Clear tooth entities
+        teethEntitiesRef.current.clear();
+
+        // Restore original mesh visibility
+        [maxillaMeshRef, mandibleMeshRef].forEach((ref) => {
+          if (ref.current) {
+            ref.current.visible = true;
+          }
+        });
+      },
+
+      detachGizmo: () => {
+        const tc = transformRef.current;
+        if (tc) tc.detach();
+      },
+
+      // ── Auto occlusal plane computation ──────────────────────────────────
+      computeAutoOcclusalPlane: (): AutoPlaneResult | null => {
+        const maxMesh = maxillaMeshRef.current;
+        const manMesh = mandibleMeshRef.current;
+        if (!maxMesh || !manMesh) return null;
+
+        const result = runAutoPlane(maxMesh.geometry, manMesh.geometry);
+
+        // Visualize: remove old plane, add new single plane
+        const scene = sceneRef.current;
+        if (scene) {
+          if (occlusalPlaneRef.current) scene.remove(occlusalPlaneRef.current);
+          if (normalArrowRef.current) scene.remove(normalArrowRef.current);
+
+          const { planeMesh, normalArrow } = buildSinglePlaneVis(
+            result.normal,
+            result.center
+          );
+          scene.add(planeMesh);
+          scene.add(normalArrow);
+          occlusalPlaneRef.current = planeMesh;
+          normalArrowRef.current = normalArrow;
+        }
+
+        const planeData: OcclusalPlaneData = {
+          normal: result.normal,
+          center: result.center,
+        };
+        occlusalDataRef.current = planeData;
+
+        return result;
+      },
+
+      // ── Anterior pick mode for full alignment ──────────────────────────────
+      setAnteriorPickMode: () => {
+        pickModeRef.current = "anteriorPick";
+        setPickModeState("anteriorPick");
+      },
+
+      // ── Full alignment with anterior point ───────────────────────────────────
+      applyFullAlignment: (anteriorPoint: THREE.Vector3): AlignmentBasis | null => {
+        const plane = occlusalDataRef.current;
+        if (!plane) return null;
+
+        // Apply occlusal alignment first
+        const pivotGroup = pivotGroupRef.current;
+        if (!pivotGroup) return null;
+
+        // Reset pivot to identity
+        pivotGroup.position.set(0, 0, 0);
+        pivotGroup.quaternion.identity();
+        pivotGroup.scale.set(1, 1, 1);
+        pivotGroup.updateMatrixWorld(true);
+
+        // Align normal to +Y
+        const alignQ = new THREE.Quaternion();
+        const sourceNormal = plane.normal.clone().normalize();
+        const dot = sourceNormal.dot(new THREE.Vector3(0, 1, 0));
+        if (Math.abs(dot) < 0.9999) {
+          alignQ.setFromUnitVectors(sourceNormal, new THREE.Vector3(0, 1, 0));
+        }
+
+        pivotGroup.quaternion.copy(alignQ);
+        pivotGroup.updateMatrixWorld(true);
+
+        // Compute alignment basis
+        const center = plane.center.clone();
+        const Z = new THREE.Vector3(0, 1, 0); // up after alignment
+        const Y = new THREE.Vector3(0, 0, -1); // default anterior
+        const X = new THREE.Vector3().crossVectors(Y, Z).normalize();
+
+        const basis: AlignmentBasis = { X, Y, Z, center };
+        alignmentBasisRef.current = basis;
+        alignmentAppliedRef.current = true;
+
+        return basis;
+      },
+
+      // ── Occlusal alignment — normal→+Y only (no landmark yaw) ──────────
+      applyOcclusalAlignment: (plane: OcclusalPlaneData) => {
+        const pivotGroup = pivotGroupRef.current;
+        if (!pivotGroup) return;
+
+        // Reset pivot to identity — makes the operation idempotent
+        pivotGroup.position.set(0, 0, 0);
+        pivotGroup.quaternion.identity();
+        pivotGroup.scale.set(1, 1, 1);
+        pivotGroup.updateMatrixWorld(true);
+
+        // ── Step 1: normal → +Y (occlusal plane becomes world XZ) ────────────
+        const alignQ = new THREE.Quaternion();
+        const sourceNormal = plane.normal.clone().normalize();
+        const dot = sourceNormal.dot(new THREE.Vector3(0, 1, 0));
+        if (Math.abs(dot) < 0.9999) {
+          alignQ.setFromUnitVectors(sourceNormal, new THREE.Vector3(0, 1, 0));
+        }
+
+        // ── Step 2: sagittal alignment via landmarks (if available) ──────────
+        let totalQ = alignQ.clone();
+
+        if (plane.landmarks) {
+          const [p0, p1, p2] = plane.landmarks;
+          const p0r = p0.clone().applyQuaternion(alignQ);
+          const p1r = p1.clone().applyQuaternion(alignQ);
+          const p2r = p2.clone().applyQuaternion(alignQ);
+          const molarMid = new THREE.Vector3().addVectors(p0r, p1r).multiplyScalar(0.5);
+          const sagVec = new THREE.Vector3().subVectors(p2r, molarMid);
+          sagVec.y = 0; // project to XZ plane
+          const sagQ = new THREE.Quaternion();
+          if (sagVec.length() > 0.001) {
+            sagQ.setFromUnitVectors(sagVec.normalize(), new THREE.Vector3(0, 0, 1));
+          }
+          totalQ = new THREE.Quaternion().multiplyQuaternions(sagQ, alignQ);
+
+          // Ensure R molar (p1) lands at +X (patient's right)
+          const p1Final = p1.clone().applyQuaternion(totalQ);
+          if (p1Final.x < 0) {
+            const flipQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
+            totalQ.premultiply(flipQ);
+          }
+        }
+        // If no landmarks, totalQ = alignQ (normal→+Y only; user adjusts yaw via buttons)
+
+        // ── Step 3: apply rotation ────────────────────────────────────────────
+        pivotGroup.quaternion.copy(totalQ);
+        pivotGroup.updateMatrixWorld(true);
+
+        // ── Step 4: translate so occlusal center lands at world origin ────────
+        const rotatedCenter = plane.center.clone().applyQuaternion(totalQ);
+        pivotGroup.position.copy(rotatedCenter).negate();
+        pivotGroup.updateMatrixWorld(true);
+
+        alignmentAppliedRef.current = true;
+
+        // ── Step 5: remove plane vis (it has served its purpose) ─────────────
+        const scene = sceneRef.current;
+        if (scene) {
+          if (occlusalPlaneRef.current) { scene.remove(occlusalPlaneRef.current); occlusalPlaneRef.current = null; }
+          if (normalArrowRef.current) { scene.remove(normalArrowRef.current); normalArrowRef.current = null; }
+        }
+
+        // ── Step 6: attach gizmo for fine-tuning ─────────────────────────────
+        const tc = transformRef.current;
+        if (tc) {
+          tc.detach();
+          tc.attach(pivotGroup);
+          tc.camera = getCamera();
+        }
+
+        // ── Step 7: refit camera
+        fitCamera();
+      },
+
+      saveAlignmentMatrix: () => {
+        const pivotGroup = pivotGroupRef.current;
+        if (!pivotGroup) return new THREE.Matrix4();
+        pivotGroup.updateMatrixWorld(true);
+        return pivotGroup.matrixWorld.clone();
+      },
+
+      resetAlignment: () => {
+        const pivotGroup = pivotGroupRef.current;
+        if (!pivotGroup) return;
+        pivotGroup.position.set(0, 0, 0);
+        pivotGroup.quaternion.identity();
+        pivotGroup.updateMatrixWorld(true);
+        alignmentAppliedRef.current = false;
+        const tc = transformRef.current;
+        if (tc) tc.detach();
+        // Re-attach to occlusal plane if defined
+        if (occlusalPlaneRef.current) {
+          tc?.attach(occlusalPlaneRef.current);
+        }
+        fitCamera();
+      },
+
+      getAlignmentBasis: () => {
+        return alignmentBasisRef.current;
+      },
+
+      // ── Post-alignment flip corrections ──────────────────────────────────────
+      // "Flip Normal" — rotates 180° around X axis:  flips up/down
+      //   Use when occlusal surface faces DOWN instead of UP after alignment.
+      flipAlignmentNormal: () => {
+        const pivotGroup = pivotGroupRef.current;
+        if (!pivotGroup) return;
+        const flipQ = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(1, 0, 0),
+          Math.PI
+        );
+        pivotGroup.quaternion.premultiply(flipQ);
+        pivotGroup.updateMatrixWorld(true);
+      },
+
+      // "Flip R/L" — rotates 180° around Y axis: flips left/right
+      flipAlignmentX: () => {
+        const pivotGroup = pivotGroupRef.current;
+        if (!pivotGroup) return;
+        const flipQ = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(0, 1, 0),
+          Math.PI
+        );
+        pivotGroup.quaternion.premultiply(flipQ);
+        pivotGroup.updateMatrixWorld(true);
+      },
+
+      // "Flip Front/Back" — rotates 180° around Z axis (WCS up=Y after alignment)
+      //   Actually rotates around Y since Y is up after alignment, giving 180° yaw
+      flipFrontBack: () => {
+        const pivotGroup = pivotGroupRef.current;
+        if (!pivotGroup) return;
+        const flipQ = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(0, 1, 0),
+          Math.PI
+        );
+        pivotGroup.quaternion.premultiply(flipQ);
+        pivotGroup.updateMatrixWorld(true);
+      },
+
+      // ── Tooth entity access methods ───────────────────────────────────────────
+      // Get all tooth entities
+      getToothEntities: () => {
+        return new Map(teethEntitiesRef.current);
+      },
+
+      // Export teeth to JSON
+      exportTeethJSON: () => {
+        return exportAllTeethToJSON(teethEntitiesRef.current);
+      },
+
+      // Download teeth as JSON file
+      downloadTeethJSON: (filename?: string) => {
+        downloadTeethJSON(teethEntitiesRef.current, filename);
+      },
+
+      // Toggle LCS visibility
+      setLCSVisible: (visible: boolean) => {
+        showLCSRef.current = visible;
+        if (teethVizRef.current) {
+          setLCSVisibility(teethVizRef.current, visible);
+        }
+      },
+
+      // Get individual tooth
+      getTooth: (toothId: number) => {
+        return teethEntitiesRef.current.get(toothId);
+      },
+
+      // Transform individual tooth
+      transformTooth: (toothId: number, matrix: THREE.Matrix4) => {
+        const tooth = teethEntitiesRef.current.get(toothId);
+        if (tooth) {
+          tooth.mesh.applyMatrix4(matrix);
+        }
       },
     }));
 
@@ -586,46 +1231,11 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       }
     }, [showGrid]);
 
-    // ── View mode prop ────────────────────────────────────────────────────────
+    // ── View mode prop — delegates to the imperative setView ─────────────
+    // We rely on the parent calling viewerRef.current.setView() explicitly,
+    // so this effect is intentionally left minimal to avoid double-execution.
     useEffect(() => {
-      const controls = controlsRef.current;
-      const cam = getCamera();
-      if (!controls || !cam) return;
-
-      const box = new THREE.Box3();
-      [maxillaMeshRef, mandibleMeshRef].forEach((r) => {
-        if (r.current) box.expandByObject(r.current);
-      });
-      const center = box.isEmpty()
-        ? new THREE.Vector3()
-        : (() => {
-          const c = new THREE.Vector3();
-          box.getCenter(c);
-          return c;
-        })();
-      const dist = 18;
-
-      switch (viewMode) {
-        case "front":
-          cam.position.set(center.x, center.y, center.z + dist);
-          break;
-        case "top":
-          cam.position.set(center.x, center.y + dist, center.z);
-          cam.up.set(0, 0, -1);
-          break;
-        case "bottom":
-          cam.position.set(center.x, center.y - dist, center.z);
-          cam.up.set(0, 0, 1);
-          break;
-        case "side":
-          cam.position.set(center.x + dist, center.y, center.z);
-          break;
-        default:
-          cam.up.set(0, 1, 0);
-          cam.position.set(center.x, center.y + dist * 0.4, center.z + dist);
-      }
-      controls.target.copy(center);
-      controls.update();
+      // Only auto-apply on initial mount or when prop changes without explicit call
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [viewMode]);
 
@@ -679,7 +1289,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.1;
       renderer.outputColorSpace = THREE.SRGBColorSpace;
-      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.shadowMap.type = THREE.PCFShadowMap;
       rendererRef.current = renderer;
       mountRef.current.appendChild(renderer.domElement);
 
@@ -725,6 +1335,33 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       scene.add(tc.getHelper());
       transformRef.current = tc;
 
+      // ── ViewCube setup ─────────────────────────────────────────────────────
+      const cubeScene = new THREE.Scene();
+      cubeScene.add(new THREE.AmbientLight(0xffffff, 3.0));
+      const cubeCam = new THREE.PerspectiveCamera(35, 1, 0.1, 100);
+      cubeCam.position.set(0, 0, 3.5);
+      const cubeGroup = new THREE.Group();
+      const boxGeom = new THREE.BoxGeometry(1, 1, 1);
+      const boxMats = [
+        makeViewCubeFaceMat("R", "#c0392b"),
+        makeViewCubeFaceMat("L", "#8e44ad"),
+        makeViewCubeFaceMat("Top", "#2980b9"),
+        makeViewCubeFaceMat("Bot", "#1a5276"),
+        makeViewCubeFaceMat("Fr", "#27ae60"),
+        makeViewCubeFaceMat("Bk", "#1e8449"),
+      ];
+      const cubeBox = new THREE.Mesh(boxGeom, boxMats);
+      cubeGroup.add(cubeBox);
+      cubeGroup.add(new THREE.LineSegments(
+        new THREE.EdgesGeometry(boxGeom),
+        new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.7 })
+      ));
+      cubeScene.add(cubeGroup);
+      cubeSceneRef.current = cubeScene;
+      cubeCameraRef.current = cubeCam;
+      cubeGroupRef.current = cubeGroup;
+      cubeBoxMeshRef.current = cubeBox;
+
       // Lighting
       const ambient = new THREE.AmbientLight(0xffffff, 1.6);
       ambientLightRef.current = ambient;
@@ -763,7 +1400,29 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
         frameRef.current = requestAnimationFrame(animate);
         controls.update();
         const cam = isOrthoRef.current ? orthoCam : perspCam;
+
+        // Main scene
+        renderer.setScissorTest(false);
         renderer.render(scene, cam);
+
+        // ViewCube overlay (top-right corner)
+        if (cubeGroupRef.current && cubeCameraRef.current && cubeSceneRef.current && mountRef.current) {
+          const VCPX = 96;
+          const VMRG = 10;
+          const cw = mountRef.current.clientWidth;
+          const ch = mountRef.current.clientHeight;
+          cubeGroupRef.current.quaternion.copy(cam.quaternion).invert();
+          cubeGroupRef.current.updateMatrixWorld(true);
+          renderer.setScissorTest(true);
+          renderer.setScissor(cw - VCPX - VMRG, ch - VCPX - VMRG, VCPX, VCPX);
+          renderer.setViewport(cw - VCPX - VMRG, ch - VCPX - VMRG, VCPX, VCPX);
+          renderer.autoClear = false;
+          renderer.clearDepth();
+          renderer.render(cubeSceneRef.current, cubeCameraRef.current);
+          renderer.autoClear = true;
+          renderer.setScissorTest(false);
+          renderer.setViewport(0, 0, cw, ch);
+        }
       };
       animate();
 
@@ -875,7 +1534,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
           if (controlsRef.current) controlsRef.current.enabled = true;
           try {
             (mountRef.current as HTMLDivElement).releasePointerCapture(e.pointerId);
-          } catch {}
+          } catch { }
           // Notify parent of updated plane after drag ends
           if (landmarksRef.current.length === 3 && occlusalDataRef.current) {
             onOcclusalPlaneDefined?.(occlusalDataRef.current);
@@ -888,12 +1547,18 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
         const downPos = pointerDownPosRef.current;
         pointerDownPosRef.current = null;
 
-        if (!downPos || pickModeRef.current !== "landmark") return;
-        if (landmarksRef.current.length >= 3) return;
+        if (!downPos) return;
 
         const dx = e.clientX - downPos.x;
         const dy = e.clientY - downPos.y;
         if (Math.sqrt(dx * dx + dy * dy) > CLICK_THRESHOLD_PX) return; // Was an orbit drag
+
+        // ── ViewCube click (works in any pick mode) ────────────────────────────
+        const vcView = checkViewCubeClick(e.clientX, e.clientY);
+        if (vcView) { setViewCallback(vcView); return; }
+
+        if (pickModeRef.current !== "landmark") return;
+        if (landmarksRef.current.length >= 3) return;
 
         // Place new landmark
         const mount = mountRef.current;
@@ -933,7 +1598,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
           setPickModeState("none");
         }
       },
-      [getCamera, onLandmarkPicked, onOcclusalPlaneDefined, rebuildPlane]
+      [getCamera, onLandmarkPicked, onOcclusalPlaneDefined, rebuildPlane, checkViewCubeClick, setViewCallback]
     );
 
     // ── Drag-and-drop ─────────────────────────────────────────────────────────
