@@ -38,6 +38,18 @@ export interface ToothExportJSON {
   mesh_data: string;
 }
 
+export interface LandmarkPoint {
+  class: string;
+  coord: [number, number, number];
+  score: number;
+  tooth_id?: number;
+}
+
+export interface SegmentationResult {
+  labels: number[];
+  landmarks: LandmarkPoint[];
+}
+
 export const FDI_LABELS: Record<number, string> = {
   11: "Upper Right Central Incisor",
   12: "Upper Right Lateral Incisor",
