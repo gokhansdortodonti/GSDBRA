@@ -18,7 +18,9 @@ import {
 } from "lucide-react";
 import ScanLoader, { type ScanFile } from "./ScanLoader";
 import OcclusalAlignment from "./OcclusalAlignment";
-import type { ThreeViewerHandle, OcclusalPlaneData, ViewPreset } from "./ThreeViewer";
+import SegmentationPanel from "./SegmentationPanel";
+import ToothExportPanel from "./ToothExportPanel";
+import type { ThreeViewerHandle, OcclusalPlaneData, ViewPreset, SegmentationResult } from "./ThreeViewer";
 
 // Dynamic import — Three.js is client-side only
 const ThreeViewer = dynamic(() => import("./ThreeViewer"), { ssr: false });
@@ -53,11 +55,12 @@ function ToothIcon({ color }: { color: string }) {
 }
 
 // ─── Workflow stages ──────────────────────────────────────────────────────────
-type Stage = "load" | "align" | "plan";
+type Stage = "load" | "align" | "segment" | "plan";
 
 const STAGES: { id: Stage; label: string }[] = [
   { id: "load", label: "Load Scan" },
   { id: "align", label: "Occlusal Alignment" },
+  { id: "segment", label: "Segmentation" },
   { id: "plan", label: "Bracket Planning" },
 ];
 
@@ -72,9 +75,11 @@ export default function OrthoApp() {
   const [orthographic, setOrthographic] = useState(false);
   const [notification, setNotification] = useState<string | null>(null);
 
-  // Occlusal plane state (lifted from viewer)
-  const [landmarkCount, setLandmarkCount] = useState(0);
+  // Occlusal plane state
   const [occlusalPlane, setOcclusalPlane] = useState<OcclusalPlaneData | null>(null);
+  const [alignmentApplied, setAlignmentApplied] = useState(false);
+  const [alignmentSaved, setAlignmentSaved] = useState(false);
+  const [autoComputeStatus, setAutoComputeStatus] = useState<"idle" | "computing" | "done" | "error">("idle");
 
   const viewerRef = useRef<ThreeViewerHandle>(null);
 
@@ -88,6 +93,14 @@ export default function OrthoApp() {
 
   // Scene lighting
   const [sceneBrightness, setSceneBrightness] = useState(1);
+
+  // Segmentation results (per jaw)
+  const [segResults, setSegResults] = useState<
+    Partial<Record<"maxilla" | "mandible", SegmentationResult>>
+  >({});
+
+  // Tooth count for export panel
+  const [toothCount, setToothCount] = useState(0);
 
   // Bracket planning state
   const [selectedJaw, setSelectedJaw] = useState<"maxilla" | "mandible" | "both">("maxilla");
@@ -167,15 +180,49 @@ export default function OrthoApp() {
   };
 
   // ── Occlusal alignment callbacks ──────────────────────────────────────────
-  const handleStartPicking = useCallback(() => {
-    viewerRef.current?.setPickMode("landmark");
-    notify("Click 3 points on the maxilla to define the occlusal plane", 5000);
+  const handleAutoCompute = useCallback(() => {
+    setAutoComputeStatus("computing");
+    // Use requestAnimationFrame to allow UI to show spinner before heavy computation
+    requestAnimationFrame(() => {
+      try {
+        const result = viewerRef.current?.computeAutoOcclusalPlane();
+        if (!result) {
+          setAutoComputeStatus("error");
+          notify("Overlap noktası bulunamadı", 5000);
+          return;
+        }
+        const planeData: OcclusalPlaneData = {
+          normal: result.normal,
+          center: result.center,
+        };
+        setOcclusalPlane(planeData);
+        setAutoComputeStatus("done");
+
+        // Immediately apply alignment
+        viewerRef.current?.applyOcclusalAlignment(planeData);
+        setAlignmentApplied(true);
+        setAlignmentSaved(false);
+
+        // Switch to top view
+        setTimeout(() => {
+          viewerRef.current?.setView("top");
+          setViewMode("top");
+        }, 50);
+        notify("Oklüzal düzlem otomatik olarak hesaplandı ve hizalandı", 5000);
+      } catch {
+        setAutoComputeStatus("error");
+        notify("Hesaplama hatası", 5000);
+      }
+    });
   }, [notify]);
 
-  const handleClearLandmarks = useCallback(() => {
+  const handleResetAlignment = useCallback(() => {
+    viewerRef.current?.resetAlignment();
     viewerRef.current?.clearLandmarks();
-    setLandmarkCount(0);
     setOcclusalPlane(null);
+    setAlignmentApplied(false);
+    setAlignmentSaved(false);
+    setAutoComputeStatus("idle");
   }, []);
 
   const handleSetGizmoMode = useCallback(
@@ -196,10 +243,6 @@ export default function OrthoApp() {
     viewerRef.current?.setView(view);
   }, []);
 
-  const handleUndoLandmark = useCallback(() => {
-    viewerRef.current?.undoLandmark();
-  }, []);
-
   const handleSetGizmoAxis = useCallback(
     (axis: "all" | "x" | "y" | "z") => {
       viewerRef.current?.setGizmoAxis(axis);
@@ -207,16 +250,68 @@ export default function OrthoApp() {
     []
   );
 
-  // Auto-switch to top view when entering occlusal alignment stage
+  const handleSaveAlignmentMatrix = useCallback(() => {
+    viewerRef.current?.saveAlignmentMatrix();
+    setAlignmentSaved(true);
+    notify("Final position saved");
+  }, [notify]);
+
+  const handleFlipNormal = useCallback(() => {
+    viewerRef.current?.flipAlignmentNormal();
+  }, []);
+
+  const handleFlipX = useCallback(() => {
+    viewerRef.current?.flipAlignmentX();
+  }, []);
+
+  const handleFlipFrontBack = useCallback(() => {
+    viewerRef.current?.flipFrontBack();
+  }, []);
+
+  // Export handlers
+  const handleExportJSON = useCallback(() => {
+    if (viewerRef.current) {
+      viewerRef.current.downloadTeethJSON("teeth_segmentation.json");
+    }
+  }, []);
+
+  const handleToggleLCS = useCallback((visible: boolean) => {
+    if (viewerRef.current) {
+      viewerRef.current.setLCSVisible(visible);
+    }
+  }, []);
+
+  const handleResetView = useCallback(() => {
+    if (viewerRef.current) {
+      viewerRef.current.resetCamera();
+    }
+  }, []);
+
+  // Stage transition side-effects
   useEffect(() => {
     if (stage === "align") {
-      // Small delay to ensure viewer is ready
+      // Both jaws visible for auto overlap detection
+      viewerRef.current?.setMeshVisible("maxilla", true);
+      viewerRef.current?.setMeshVisible("mandible", true);
+      setMaxillaVisible(true);
+      setMandibleVisible(true);
       const t = setTimeout(() => {
-        viewerRef.current?.setView("top");
-        setViewMode("top");
+        viewerRef.current?.setView("perspective");
+        setViewMode("perspective");
       }, 150);
       return () => clearTimeout(t);
     }
+    if (stage === "segment") {
+      viewerRef.current?.setMeshVisible("mandible", true);
+      setMandibleVisible(true);
+      const t = setTimeout(() => {
+        viewerRef.current?.setView("perspective");
+        viewerRef.current?.detachGizmo();
+        setViewMode("perspective");
+      }, 150);
+      return () => clearTimeout(t);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage]);
 
   const stageIndex = STAGES.findIndex((s) => s.id === stage);
@@ -289,8 +384,8 @@ export default function OrthoApp() {
                       color: active
                         ? "var(--text-primary)"
                         : done
-                        ? "#10b981"
-                        : "var(--text-muted)",
+                          ? "#10b981"
+                          : "var(--text-muted)",
                       fontWeight: active ? 600 : 400,
                     }}
                   >
@@ -398,18 +493,55 @@ export default function OrthoApp() {
               mandibleFile={mandibleFile}
               onAlignmentComplete={() => {
                 notify("Alignment complete!");
-                setStage("plan");
+                setStage("segment");
               }}
               onBack={() => setStage("load")}
-              onStartPicking={handleStartPicking}
-              onClearLandmarks={handleClearLandmarks}
-              onUndoLandmark={handleUndoLandmark}
+              onAutoCompute={handleAutoCompute}
+              autoComputeStatus={autoComputeStatus}
               onSetGizmoMode={handleSetGizmoMode}
               onSetGizmoAxis={handleSetGizmoAxis}
               onSetOrthographic={handleSetOrthographic}
               onSetView={handleSetView}
-              landmarkCount={landmarkCount}
+              onSaveAlignmentMatrix={handleSaveAlignmentMatrix}
+              onFlipNormal={handleFlipNormal}
+              onFlipX={handleFlipX}
+              onFlipFrontBack={handleFlipFrontBack}
+              onResetAlignment={handleResetAlignment}
+              alignmentApplied={alignmentApplied}
               occlusalPlane={occlusalPlane}
+            />
+          )}
+
+
+          {stage === "segment" && (
+            <SegmentationPanel
+              maxillaFile={maxillaFile}
+              mandibleFile={mandibleFile}
+              onBack={() => {
+                viewerRef.current?.clearSegmentation();
+                setSegResults({});
+                setStage("align");
+              }}
+              onProceed={() => setStage("plan")}
+              onSegmentResult={(jaw, result) => {
+                setSegResults((prev) => ({ ...prev, [jaw]: result }));
+                viewerRef.current?.applySegmentation(result, jaw);
+                // Count unique teeth (labels > 0)
+                const uniqueTeeth = new Set(result.labels.filter((l: number) => l > 0));
+                setToothCount((prev) => prev + uniqueTeeth.size);
+                notify(
+                  `${jaw === "maxilla" ? "Maxilla" : "Mandible"} segmentasyonu tamamlandi`
+                );
+              }}
+            />
+          )}
+
+          {stage === "segment" && toothCount > 0 && (
+            <ToothExportPanel
+              toothCount={toothCount}
+              onExportJSON={handleExportJSON}
+              onToggleLCS={handleToggleLCS}
+              onResetView={handleResetView}
             />
           )}
 
@@ -611,7 +743,7 @@ export default function OrthoApp() {
 
                 {/* ── Back button ──────────────────────────── */}
                 <button
-                  onClick={() => setStage("align")}
+                  onClick={() => setStage("segment")}
                   className="text-xs py-2 rounded-lg transition-colors"
                   style={{
                     color: "var(--text-muted)",
@@ -621,7 +753,7 @@ export default function OrthoApp() {
                   onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(0,0,0,0.03)")}
                   onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                 >
-                  ← Hizalamaya Geri Dön
+                  ← Segmentasyona Geri Dön
                 </button>
               </div>
             </div>
@@ -639,17 +771,14 @@ export default function OrthoApp() {
             onMeshLoaded={(jaw, name) => {
               notify(`${jaw === "maxilla" ? "Maxilla" : "Mandible"} loaded: ${name}`);
             }}
-            onLandmarkPicked={(index) => {
-              setLandmarkCount(index + 1);
-            }}
+            onLandmarkPicked={() => { }}
             onLandmarkUndone={(newCount) => {
-              setLandmarkCount(newCount);
               if (newCount < 3) setOcclusalPlane(null);
             }}
+            onSetView={(view) => setViewMode(view)}
+            onPickError={(msg) => notify(msg, 5000)}
             onOcclusalPlaneDefined={(plane) => {
               setOcclusalPlane(plane);
-              setLandmarkCount(3);
-              notify("Occlusal plane defined! Adjust with the gizmo if needed.");
             }}
           />
 
@@ -706,7 +835,8 @@ export default function OrthoApp() {
                 <div className="flex items-center gap-2">
                   <div className="w-2.5 h-2.5 rounded-full" style={{ background: "#f59e0b" }} />
                   <span style={{ color: "var(--text-secondary)" }}>
-                    {maxillaFile.jaw === "combined" ? "Combined" : "Maxilla"}
+                    {maxillaFile?.jaw === "combined" ? "Combined" : "Maxilla"}
+
                   </span>
                 </div>
               )}
@@ -1054,8 +1184,8 @@ export default function OrthoApp() {
                         jaw === "maxilla"
                           ? "#f59e0b"
                           : jaw === "mandible"
-                          ? "#2563eb"
-                          : "#8b5cf6",
+                            ? "#2563eb"
+                            : "#8b5cf6",
                     }}
                   />
                   <div>
@@ -1063,8 +1193,8 @@ export default function OrthoApp() {
                       {jaw === "maxilla"
                         ? "Maxilla (Upper)"
                         : jaw === "mandible"
-                        ? "Mandible (Lower)"
-                        : "Combined (Both)"}
+                          ? "Mandible (Lower)"
+                          : "Combined (Both)"}
                     </div>
                   </div>
                 </button>
