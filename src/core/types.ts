@@ -1,6 +1,17 @@
 // src/core/types.ts
 import * as THREE from "three";
 
+export interface LandmarkPoint {
+  class: string;
+  coord: [number, number, number];
+  score: number;
+  tooth_id?: number;
+  toothId?: number;
+  label?: number;
+  tooth_label?: number;
+  segment_label?: number;
+}
+
 export interface ToothLandmarks {
   FA_point: THREE.Vector3;
   incisal_edge?: THREE.Vector3;
@@ -20,6 +31,7 @@ export interface ToothEntity {
   label: string;
   mesh: THREE.Mesh;
   landmarks: ToothLandmarks;
+  rawLandmarks: LandmarkPoint[];
   lcs: LocalCoordinateSystem;
   localToWorld: THREE.Matrix4;
   worldToLocal: THREE.Matrix4;
@@ -38,16 +50,31 @@ export interface ToothExportJSON {
   mesh_data: string;
 }
 
-export interface LandmarkPoint {
-  class: string;
-  coord: [number, number, number];
-  score: number;
-  tooth_id?: number;
+/** Per-tooth coordinate frame from the backend (tooth_analysis.py) */
+export interface ToothAnalysisData {
+  fdi: number;
+  name: string;
+  vertex_count: number;
+  centroid: [number, number, number];
+  okluzogingival: [number, number, number];
+  mesiodistal: [number, number, number];
+  faciolingual: [number, number, number];
+  fa_point: [number, number, number];
+  facc_vector: [number, number, number];
+  bbox_extent: number;
+  eigenvalues: [number, number, number];
+}
+
+export interface TeethAnalysisResult {
+  jaw_type: "upper" | "lower";
+  arch_center: [number, number, number];
+  teeth: ToothAnalysisData[];
 }
 
 export interface SegmentationResult {
   labels: number[];
   landmarks: LandmarkPoint[];
+  teeth?: TeethAnalysisResult;
 }
 
 export const FDI_LABELS: Record<number, string> = {

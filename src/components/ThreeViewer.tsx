@@ -15,11 +15,16 @@ import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { computeAutoOcclusalPlane as runAutoPlane, type AutoPlaneResult } from "./autoOcclusalPlane";
-// Tooth segmentation integration
-import { segmentTeeth, createToothGroup } from "../core/ToothSegmenter";
+import { extractJawBaseMesh, segmentTeeth } from "../core/ToothSegmenter";
 import { createAllTeethVisualization, setLCSVisibility } from "./ToothVisualization";
 import { downloadTeethJSON, exportAllTeethToJSON } from "../utils/toothExport";
-import type { ToothEntity, ToothExportJSON } from "../core/types";
+import type {
+  LandmarkPoint,
+  SegmentationResult,
+  ToothEntity,
+  ToothExportJSON,
+} from "../core/types";
+export type { LandmarkPoint, SegmentationResult } from "../core/types";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 export interface OcclusalPlaneData {
@@ -33,17 +38,6 @@ export interface AlignmentBasis {
   Y: THREE.Vector3; // front (anterior)
   Z: THREE.Vector3; // up (occlusal normal)
   center: THREE.Vector3;
-}
-
-export interface LandmarkPoint {
-  class: string;
-  coord: [number, number, number];
-  score: number;
-}
-
-export interface SegmentationResult {
-  labels: number[];
-  landmarks: LandmarkPoint[];
 }
 
 export interface ThreeViewerHandle {
@@ -63,7 +57,7 @@ export interface ThreeViewerHandle {
   setSceneBrightness: (value: number) => void;
   undoLandmark: () => void;
   setGizmoAxis: (axis: "all" | "x" | "y" | "z") => void;
-  applySegmentation: (result: SegmentationResult, jaw: "maxilla" | "mandible") => void;
+  applySegmentation: (result: SegmentationResult, jaw: "maxilla" | "mandible") => number;
   clearSegmentation: () => void;
   detachGizmo: () => void;
   // ── Tooth entity access ─────────────────────────────────────────────────────
@@ -88,7 +82,8 @@ export interface ThreeViewerHandle {
 }
 
 export type PickMode = "none" | "landmark" | "anteriorPick";
-export type ViewPreset = "perspective" | "front" | "back" | "top" | "sideLeft" | "sideRight" | "bottom";
+export type ViewPreset = "perspective" | "front" | "back" | "top" | "side" | "sideLeft" | "sideRight" | "bottom";
+type JawKey = "maxilla" | "mandible";
 
 interface ThreeViewerProps {
   onMeshLoaded?: (jaw: "maxilla" | "mandible", fileName: string) => void;
@@ -133,6 +128,54 @@ const LANDMARK_LABELS = ["L Molar", "R Molar", "Anterior"];
 const PLANE_COLOR = 0x2563eb;
 const CLICK_THRESHOLD_PX = 6;
 
+function dedupeGeometryForSegmentation(
+  geometry: THREE.BufferGeometry
+): THREE.BufferGeometry {
+  const position = geometry.getAttribute("position");
+  if (!position) {
+    return geometry;
+  }
+
+  const index = geometry.getIndex();
+  const triangleCount = index ? Math.floor(index.count / 3) : Math.floor(position.count / 3);
+  const dedupedPositions: number[] = [];
+  const dedupedIndices: number[] = [];
+  const uniqueVertexMap = new Map<string, number>();
+
+  for (let triangleIndex = 0; triangleIndex < triangleCount; triangleIndex++) {
+    for (let corner = 0; corner < 3; corner++) {
+      const sourceIndex = index
+        ? index.getX(triangleIndex * 3 + corner)
+        : triangleIndex * 3 + corner;
+      const x = position.getX(sourceIndex);
+      const y = position.getY(sourceIndex);
+      const z = position.getZ(sourceIndex);
+      const key = `${Math.round(x * 1e8)},${Math.round(y * 1e8)},${Math.round(z * 1e8)}`;
+
+      let dedupedIndex = uniqueVertexMap.get(key);
+      if (dedupedIndex === undefined) {
+        dedupedIndex = dedupedPositions.length / 3;
+        uniqueVertexMap.set(key, dedupedIndex);
+        dedupedPositions.push(x, y, z);
+      }
+
+      dedupedIndices.push(dedupedIndex);
+    }
+  }
+
+  const normalizedGeometry = new THREE.BufferGeometry();
+  normalizedGeometry.setAttribute(
+    "position",
+    new THREE.Float32BufferAttribute(dedupedPositions, 3)
+  );
+  normalizedGeometry.setIndex(dedupedIndices);
+  normalizedGeometry.computeVertexNormals();
+  normalizedGeometry.computeBoundingBox();
+  normalizedGeometry.computeBoundingSphere();
+
+  return normalizedGeometry;
+}
+
 // Per-tooth color palette (20 distinct colors for FDI teeth)
 const TOOTH_PALETTE: number[] = [
   0xe63946, 0xf4a261, 0xe9c46a, 0x2a9d8f, 0x457b9d,
@@ -142,27 +185,20 @@ const TOOTH_PALETTE: number[] = [
 ];
 
 // Landmark class → sphere color
-const SEGMENTATION_LM_COLORS: Record<string, number> = {
-  FacialPoint: 0x16a34a,
-  Cusp: 0xeab308,
-  Mesial: 0xff4444,
-  Distal: 0x4488ff,
-  OuterPoint: 0xf97316,
-  InnerPoint: 0x9333ea,
-};
-
 // ─── Load geometry from file ──────────────────────────────────────────────────
 function loadGeometry(file: File): Promise<THREE.BufferGeometry> {
   return new Promise((resolve, reject) => {
     const ext = file.name.split(".").pop()?.toLowerCase();
     const url = URL.createObjectURL(file);
-
     const finish = (geom: THREE.BufferGeometry) => {
       URL.revokeObjectURL(url);
-      geom.computeVertexNormals();
+      const normalizedGeometry = dedupeGeometryForSegmentation(geom);
+      if (normalizedGeometry !== geom) {
+        geom.dispose();
+      }
       // Preserve original scanner coordinates — scaling applied uniformly
       // in loadMesh so that bite relationship between maxilla/mandible is intact
-      resolve(geom);
+      resolve(normalizedGeometry);
     };
 
     if (ext === "stl") {
@@ -380,12 +416,6 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
     const normalArrowRef = useRef<THREE.ArrowHelper | null>(null);
     const occlusalDataRef = useRef<OcclusalPlaneData | null>(null);
 
-    // Segmentation landmark spheres (per jaw, so clearing one jaw doesn't remove the other)
-    const segSpheresRef = useRef<{ maxilla: THREE.Mesh[]; mandible: THREE.Mesh[] }>({
-      maxilla: [],
-      mandible: [],
-    });
-
     // Pointer state for drag detection and sphere dragging
     const pointerDownPosRef = useRef<{ x: number; y: number } | null>(null);
     const draggingSphereRef = useRef<{ sphere: THREE.Mesh; index: number } | null>(null);
@@ -400,9 +430,15 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
     const dirLight1Ref = useRef<THREE.DirectionalLight | null>(null);
 
     // Segmentation state
-    const teethEntitiesRef = useRef<Map<number, ToothEntity>>(new Map());
-    const teethVizRef = useRef<THREE.Group | null>(null);
-    const showLCSRef = useRef<boolean>(false);
+    const teethEntitiesRef = useRef<Record<JawKey, Map<number, ToothEntity>>>({
+      maxilla: new Map(),
+      mandible: new Map(),
+    });
+    const teethVizRef = useRef<Record<JawKey, THREE.Group | null>>({
+      maxilla: null,
+      mandible: null,
+    });
+    const showLCSRef = useRef<boolean>(true);
 
     const [isDragOver, setIsDragOver] = useState(false);
     const [pickMode, setPickModeState] = useState<PickMode>("none");
@@ -463,15 +499,75 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       controls.update();
     }, [getCamera]);
 
+    const clearSegmentationForJaw = useCallback((jaw: JawKey) => {
+      const pivotGroup = pivotGroupRef.current;
+      const scene = sceneRef.current;
+      const vizGroup = teethVizRef.current[jaw];
+
+      if (vizGroup) {
+        if (pivotGroup) {
+          pivotGroup.remove(vizGroup);
+        } else {
+          scene?.remove(vizGroup);
+        }
+        teethVizRef.current[jaw] = null;
+      }
+
+      teethEntitiesRef.current[jaw].clear();
+
+      const meshRef = jaw === "maxilla" ? maxillaMeshRef : mandibleMeshRef;
+      if (meshRef.current) {
+        meshRef.current.visible = true;
+      }
+    }, []);
+
+    const getAllToothEntities = useCallback(() => {
+      const merged = new Map<number, ToothEntity>();
+
+      (["maxilla", "mandible"] as JawKey[]).forEach((jaw) => {
+        teethEntitiesRef.current[jaw].forEach((tooth, toothId) => {
+          merged.set(toothId, tooth);
+        });
+      });
+
+      return merged;
+    }, []);
+
+    const applyToJawMaterials = useCallback(
+      (jaw: JawKey, update: (material: THREE.MeshPhysicalMaterial) => void) => {
+        const meshRef = jaw === "maxilla" ? maxillaMeshRef : mandibleMeshRef;
+        if (meshRef.current) {
+          update(meshRef.current.material as THREE.MeshPhysicalMaterial);
+        }
+
+        const vizGroup = teethVizRef.current[jaw];
+        if (!vizGroup) return;
+
+        vizGroup.traverse((child) => {
+          if (
+            (child as THREE.Mesh).isMesh &&
+            (
+              child.name.startsWith("tooth_mesh_") ||
+              child.name.startsWith("jaw_base_") ||
+              child.name.startsWith("jaw_reference_")
+            )
+          ) {
+            update((child as THREE.Mesh).material as THREE.MeshPhysicalMaterial);
+          }
+        });
+      },
+      []
+    );
+
     // ── Set backface culling for both jaw meshes ───────────────────────────
     const setJawCulling = useCallback((frontOnly: boolean) => {
-      [maxillaMeshRef, mandibleMeshRef].forEach((r) => {
-        if (!r.current) return;
-        const mat = r.current.material as THREE.MeshPhysicalMaterial;
-        mat.side = frontOnly ? THREE.FrontSide : THREE.DoubleSide;
-        mat.needsUpdate = true;
+      (["maxilla", "mandible"] as JawKey[]).forEach((jaw) => {
+        applyToJawMaterials(jaw, (material) => {
+          material.side = frontOnly ? THREE.FrontSide : THREE.DoubleSide;
+          material.needsUpdate = true;
+        });
       });
-    }, []);
+    }, [applyToJawMaterials]);
 
     // ── Sync ortho camera frustum on resize ───────────────────────────────────
     const syncOrthoFrustum = useCallback(() => {
@@ -534,6 +630,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
             dir = basis.Y.clone().negate();
             up = basis.Z.clone();
             break;
+          case "side":
           case "sideLeft":
             dir = basis.X.clone().negate();
             up = basis.Z.clone();
@@ -595,6 +692,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
             setJawCulling(true);
             break;
           }
+          case "side":
           case "sideLeft":
             setJawCulling(false);
             cam.up.set(0, 1, 0);
@@ -738,6 +836,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
           wireframe,
         });
         const mesh = new THREE.Mesh(geom, mat);
+        mesh.userData.importScale = scaleFactorRef.current ?? 1;
         mesh.castShadow = true;
         mesh.receiveShadow = true;
 
@@ -753,6 +852,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
         const pivotGroup = pivotGroupRef.current;
 
         const meshRef = jaw === "maxilla" ? maxillaMeshRef : mandibleMeshRef;
+        clearSegmentationForJaw(jaw);
         if (meshRef.current) pivotGroup.remove(meshRef.current);
         meshRef.current = mesh;
         pivotGroup.add(mesh);
@@ -761,6 +861,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       },
 
       clearMesh: (jaw: "maxilla" | "mandible") => {
+        clearSegmentationForJaw(jaw);
         const meshRef = jaw === "maxilla" ? maxillaMeshRef : mandibleMeshRef;
         if (meshRef.current && pivotGroupRef.current) {
           pivotGroupRef.current.remove(meshRef.current);
@@ -777,10 +878,11 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       resetCamera: () => fitCamera(),
 
       setWireframe: (v: boolean) => {
-        [maxillaMeshRef, mandibleMeshRef].forEach((r) => {
-          if (r.current) {
-            (r.current.material as THREE.MeshPhysicalMaterial).wireframe = v;
-          }
+        (["maxilla", "mandible"] as JawKey[]).forEach((jaw) => {
+          applyToJawMaterials(jaw, (material) => {
+            material.wireframe = v;
+            material.needsUpdate = true;
+          });
         });
       },
 
@@ -872,17 +974,24 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
 
       setMeshVisible: (jaw: "maxilla" | "mandible", visible: boolean) => {
         const meshRef = jaw === "maxilla" ? maxillaMeshRef : mandibleMeshRef;
-        if (meshRef.current) meshRef.current.visible = visible;
+        const vizGroup = teethVizRef.current[jaw];
+
+        if (vizGroup) {
+          vizGroup.visible = visible;
+        }
+
+        if (meshRef.current) {
+          meshRef.current.visible = vizGroup ? false : visible;
+        }
       },
 
       setMeshOpacity: (jaw: "maxilla" | "mandible", opacity: number) => {
-        const meshRef = jaw === "maxilla" ? maxillaMeshRef : mandibleMeshRef;
-        if (!meshRef.current) return;
-        const mat = meshRef.current.material as THREE.MeshPhysicalMaterial;
-        mat.transparent = opacity < 1;
-        mat.opacity = opacity;
-        mat.depthWrite = opacity >= 1;
-        mat.needsUpdate = true;
+        applyToJawMaterials(jaw, (material) => {
+          material.transparent = opacity < 1;
+          material.opacity = opacity;
+          material.depthWrite = opacity >= 1;
+          material.needsUpdate = true;
+        });
       },
 
       setMeshColor: (jaw: "maxilla" | "mandible", hex: string) => {
@@ -903,54 +1012,61 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       // ── Tooth segmentation ────────────────────────────────────────────────
       applySegmentation: (result: SegmentationResult, jaw: "maxilla" | "mandible") => {
         const mesh = jaw === "maxilla" ? maxillaMeshRef.current : mandibleMeshRef.current;
-        if (!mesh) return;
-
-        // Remove old segmentation visualization
-        if (teethVizRef.current) {
-          sceneRef.current?.remove(teethVizRef.current);
-          teethVizRef.current = null;
+        const pivotGroup = pivotGroupRef.current;
+        if (!mesh || !pivotGroup) {
+          return 0;
         }
 
-        // Segment teeth and create entities
-        const teeth = segmentTeeth(mesh.geometry, result, jaw);
-        teethEntitiesRef.current = teeth;
+        const position = mesh.geometry.getAttribute("position");
+        if (!position || result.labels.length === 0) {
+          console.warn(
+            `[Seg] ${jaw}: no position attribute or empty labels (position=${position?.count ?? 0}, labels=${result.labels.length})`
+          );
+          fitCamera();
+          return 0;
+        }
 
-        // Create visualization
+        // Label count may differ from position.count (e.g. per-face labels for STL).
+        // segmentTeeth → createTriangleLabelReader handles face/corner/vertex modes.
+
+        mesh.updateMatrixWorld(true);
+        clearSegmentationForJaw(jaw);
+
+        const teeth = segmentTeeth(mesh, result, jaw);
+        if (teeth.size === 0) {
+          console.warn(`[Seg] ${jaw}: no tooth parts were created`);
+          fitCamera();
+          return 0;
+        }
+
+        const jawGroup = new THREE.Group();
+        jawGroup.name = `teeth_viz_${jaw}`;
+        jawGroup.position.copy(mesh.position);
+        jawGroup.quaternion.copy(mesh.quaternion);
+        jawGroup.scale.copy(mesh.scale);
+
+        const baseMesh = extractJawBaseMesh(mesh, result, jaw);
+        if (baseMesh) {
+          jawGroup.add(baseMesh);
+        }
+
         const vizGroup = createAllTeethVisualization(teeth, showLCSRef.current);
-        vizGroup.name = `teeth_viz_${jaw}`;
-        teethVizRef.current = vizGroup;
+        jawGroup.add(vizGroup);
 
-        // Hide original mesh
+        teethVizRef.current[jaw] = jawGroup;
+        teethEntitiesRef.current[jaw] = teeth;
         mesh.visible = false;
+        pivotGroup.add(jawGroup);
 
-        // Add to scene
-        sceneRef.current?.add(vizGroup);
-
-        // Fit camera to new geometry
         fitCamera();
 
         console.log(`[Seg] ${jaw}: Segmented ${teeth.size} teeth with LCS visualization`);
+        return teeth.size;
       },
 
       clearSegmentation: () => {
-        const scene = sceneRef.current;
-        if (!scene) return;
-
-        // Remove teeth visualization group
-        if (teethVizRef.current) {
-          scene.remove(teethVizRef.current);
-          teethVizRef.current = null;
-        }
-
-        // Clear tooth entities
-        teethEntitiesRef.current.clear();
-
-        // Restore original mesh visibility
-        [maxillaMeshRef, mandibleMeshRef].forEach((ref) => {
-          if (ref.current) {
-            ref.current.visible = true;
-          }
-        });
+        clearSegmentationForJaw("maxilla");
+        clearSegmentationForJaw("mandible");
       },
 
       detachGizmo: () => {
@@ -1180,35 +1296,43 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       // ── Tooth entity access methods ───────────────────────────────────────────
       // Get all tooth entities
       getToothEntities: () => {
-        return new Map(teethEntitiesRef.current);
+        return getAllToothEntities();
       },
 
       // Export teeth to JSON
       exportTeethJSON: () => {
-        return exportAllTeethToJSON(teethEntitiesRef.current);
+        return exportAllTeethToJSON(getAllToothEntities());
       },
 
       // Download teeth as JSON file
       downloadTeethJSON: (filename?: string) => {
-        downloadTeethJSON(teethEntitiesRef.current, filename);
+        downloadTeethJSON(getAllToothEntities(), filename);
       },
 
       // Toggle LCS visibility
       setLCSVisible: (visible: boolean) => {
         showLCSRef.current = visible;
-        if (teethVizRef.current) {
-          setLCSVisibility(teethVizRef.current, visible);
-        }
+        (["maxilla", "mandible"] as JawKey[]).forEach((jaw) => {
+          const vizGroup = teethVizRef.current[jaw];
+          if (vizGroup) {
+            setLCSVisibility(vizGroup, visible);
+          }
+        });
       },
 
       // Get individual tooth
       getTooth: (toothId: number) => {
-        return teethEntitiesRef.current.get(toothId);
+        return (
+          teethEntitiesRef.current.maxilla.get(toothId) ??
+          teethEntitiesRef.current.mandible.get(toothId)
+        );
       },
 
       // Transform individual tooth
       transformTooth: (toothId: number, matrix: THREE.Matrix4) => {
-        const tooth = teethEntitiesRef.current.get(toothId);
+        const tooth =
+          teethEntitiesRef.current.maxilla.get(toothId) ??
+          teethEntitiesRef.current.mandible.get(toothId);
         if (tooth) {
           tooth.mesh.applyMatrix4(matrix);
         }
@@ -1236,7 +1360,6 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
     // so this effect is intentionally left minimal to avoid double-execution.
     useEffect(() => {
       // Only auto-apply on initial mount or when prop changes without explicit call
-      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [viewMode]);
 
     // ── Orthographic prop ─────────────────────────────────────────────────────
@@ -1343,12 +1466,12 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       const cubeGroup = new THREE.Group();
       const boxGeom = new THREE.BoxGeometry(1, 1, 1);
       const boxMats = [
-        makeViewCubeFaceMat("R", "#c0392b"),
-        makeViewCubeFaceMat("L", "#8e44ad"),
-        makeViewCubeFaceMat("Top", "#2980b9"),
-        makeViewCubeFaceMat("Bot", "#1a5276"),
-        makeViewCubeFaceMat("Fr", "#27ae60"),
-        makeViewCubeFaceMat("Bk", "#1e8449"),
+        makeViewCubeFaceMat("Sağ", "#c0392b"),      // +X = patient right
+        makeViewCubeFaceMat("Sol", "#8e44ad"),       // -X = patient left
+        makeViewCubeFaceMat("Oklüzal", "#2980b9"),   // +Y = occlusal (up)
+        makeViewCubeFaceMat("Apikal", "#1a5276"),     // -Y = apical (root side)
+        makeViewCubeFaceMat("Ön", "#27ae60"),         // +Z = anterior (frontal)
+        makeViewCubeFaceMat("Arka", "#1e8449"),       // -Z = posterior (back)
       ];
       const cubeBox = new THREE.Mesh(boxGeom, boxMats);
       cubeGroup.add(cubeBox);
@@ -1714,3 +1837,4 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
 );
 
 export default ThreeViewer;
+

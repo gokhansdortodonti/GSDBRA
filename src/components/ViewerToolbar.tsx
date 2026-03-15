@@ -123,25 +123,25 @@ export default function ViewerToolbar({
       {/* View Modes */}
       <ToolButton
         icon={<span className="text-xs font-bold">3D</span>}
-        label="Perspective View"
+        label="Perspektif"
         active={viewMode === "perspective"}
         onClick={() => onViewModeChange("perspective")}
       />
       <ToolButton
-        icon={<span className="text-xs font-bold">F</span>}
-        label="Front View"
+        icon={<span className="text-xs font-bold">Ön</span>}
+        label="Frontal Görünüm"
         active={viewMode === "front"}
         onClick={() => onViewModeChange("front")}
       />
       <ToolButton
-        icon={<span className="text-xs font-bold">T</span>}
-        label="Top View"
+        icon={<span className="text-xs font-bold">Ok</span>}
+        label="Oklüzal Görünüm"
         active={viewMode === "top"}
         onClick={() => onViewModeChange("top")}
       />
       <ToolButton
-        icon={<span className="text-xs font-bold">S</span>}
-        label="Side View"
+        icon={<span className="text-xs font-bold">Yn</span>}
+        label="Lateral Görünüm"
         active={viewMode === "side"}
         onClick={() => onViewModeChange("side")}
       />

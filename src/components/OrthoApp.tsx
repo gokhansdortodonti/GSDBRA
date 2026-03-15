@@ -99,8 +99,9 @@ export default function OrthoApp() {
     Partial<Record<"maxilla" | "mandible", SegmentationResult>>
   >({});
 
-  // Tooth count for export panel
-  const [toothCount, setToothCount] = useState(0);
+  const [segmentedCounts, setSegmentedCounts] = useState<
+    Partial<Record<"maxilla" | "mandible", number>>
+  >({});
 
   // Bracket planning state
   const [selectedJaw, setSelectedJaw] = useState<"maxilla" | "mandible" | "both">("maxilla");
@@ -108,6 +109,7 @@ export default function OrthoApp() {
   const [sameArcShape, setSameArcShape] = useState(false);
   const [maxillaArcShape, setMaxillaArcShape] = useState("auto");
   const [mandibleArcShape, setMandibleArcShape] = useState("auto");
+  const toothCount = (segmentedCounts.maxilla ?? 0) + (segmentedCounts.mandible ?? 0);
 
   const notify = useCallback((msg: string, ms = 3000) => {
     setNotification(msg);
@@ -135,8 +137,12 @@ export default function OrthoApp() {
   const handleFileLoaded = (scan: ScanFile) => {
     if (scan.jaw === "maxilla" || scan.jaw === "combined") {
       setMaxillaFile(scan);
+      setSegResults((prev) => ({ ...prev, maxilla: undefined }));
+      setSegmentedCounts((prev) => ({ ...prev, maxilla: 0 }));
     } else {
       setMandibleFile(scan);
+      setSegResults((prev) => ({ ...prev, mandible: undefined }));
+      setSegmentedCounts((prev) => ({ ...prev, mandible: 0 }));
     }
   };
 
@@ -148,6 +154,8 @@ export default function OrthoApp() {
       setMandibleFile(null);
       viewerRef.current?.clearMesh("mandible");
     }
+    setSegResults((prev) => ({ ...prev, [jaw]: undefined }));
+    setSegmentedCounts((prev) => ({ ...prev, [jaw]: 0 }));
   };
 
   // ── Drag-and-drop from viewport (jaw assignment dialog) ───────────────────
@@ -287,31 +295,64 @@ export default function OrthoApp() {
     }
   }, []);
 
+  const transitionToStage = useCallback((nextStage: Stage) => {
+    if (nextStage === "align") {
+      setMaxillaVisible(true);
+      setMandibleVisible(true);
+      setViewMode("perspective");
+    } else if (nextStage === "segment") {
+      setMandibleVisible(true);
+      setViewMode("perspective");
+    }
+
+    setStage(nextStage);
+  }, []);
+
   // Stage transition side-effects
   useEffect(() => {
     if (stage === "align") {
       // Both jaws visible for auto overlap detection
       viewerRef.current?.setMeshVisible("maxilla", true);
       viewerRef.current?.setMeshVisible("mandible", true);
-      setMaxillaVisible(true);
-      setMandibleVisible(true);
       const t = setTimeout(() => {
         viewerRef.current?.setView("perspective");
-        setViewMode("perspective");
       }, 150);
       return () => clearTimeout(t);
     }
     if (stage === "segment") {
+      viewerRef.current?.setMeshVisible("maxilla", true);
       viewerRef.current?.setMeshVisible("mandible", true);
-      setMandibleVisible(true);
+      // Reset opacities to full when entering segment stage
+      viewerRef.current?.setMeshOpacity("maxilla", 1);
+      viewerRef.current?.setMeshOpacity("mandible", 1);
+      setMaxillaOpacity(1);
+      setMandibleOpacity(1);
+
+      // Auto-compute occlusal alignment if not done yet and both jaws present
+      if (!alignmentApplied && maxillaFile && mandibleFile) {
+        setTimeout(() => {
+          try {
+            const result = viewerRef.current?.computeAutoOcclusalPlane();
+            if (result) {
+              const planeData: OcclusalPlaneData = {
+                normal: result.normal,
+                center: result.center,
+              };
+              setOcclusalPlane(planeData);
+              setAutoComputeStatus("done");
+              viewerRef.current?.applyOcclusalAlignment(planeData);
+              setAlignmentApplied(true);
+            }
+          } catch { /* silently fail — user can still segment without alignment */ }
+        }, 200);
+      }
+
       const t = setTimeout(() => {
         viewerRef.current?.setView("perspective");
         viewerRef.current?.detachGizmo();
-        setViewMode("perspective");
       }, 150);
       return () => clearTimeout(t);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stage]);
 
   const stageIndex = STAGES.findIndex((s) => s.id === stage);
@@ -483,7 +524,7 @@ export default function OrthoApp() {
               mandibleFile={mandibleFile}
               onFileLoaded={handleFileLoaded}
               onFileRemoved={handleFileRemoved}
-              onProceed={() => setStage("align")}
+              onProceed={() => transitionToStage("align")}
             />
           )}
 
@@ -493,9 +534,9 @@ export default function OrthoApp() {
               mandibleFile={mandibleFile}
               onAlignmentComplete={() => {
                 notify("Alignment complete!");
-                setStage("segment");
+                transitionToStage("segment");
               }}
-              onBack={() => setStage("load")}
+              onBack={() => transitionToStage("load")}
               onAutoCompute={handleAutoCompute}
               autoComputeStatus={autoComputeStatus}
               onSetGizmoMode={handleSetGizmoMode}
@@ -517,21 +558,36 @@ export default function OrthoApp() {
             <SegmentationPanel
               maxillaFile={maxillaFile}
               mandibleFile={mandibleFile}
+              onFileLoaded={handleFileLoaded}
               onBack={() => {
                 viewerRef.current?.clearSegmentation();
                 setSegResults({});
-                setStage("align");
+                setSegmentedCounts({});
+                transitionToStage("align");
               }}
-              onProceed={() => setStage("plan")}
+              onProceed={() => transitionToStage("plan")}
               onSegmentResult={(jaw, result) => {
                 setSegResults((prev) => ({ ...prev, [jaw]: result }));
-                viewerRef.current?.applySegmentation(result, jaw);
-                // Count unique teeth (labels > 0)
-                const uniqueTeeth = new Set(result.labels.filter((l: number) => l > 0));
-                setToothCount((prev) => prev + uniqueTeeth.size);
-                notify(
-                  `${jaw === "maxilla" ? "Maxilla" : "Mandible"} segmentasyonu tamamlandi`
-                );
+                const segmentedToothCount =
+                  viewerRef.current?.applySegmentation(result, jaw) ?? 0;
+                setSegmentedCounts((prev) => ({ ...prev, [jaw]: segmentedToothCount }));
+
+                // Auto-dim the OTHER jaw to reduce visual clutter in occlusion
+                const otherJaw = jaw === "maxilla" ? "mandible" : "maxilla";
+                viewerRef.current?.setMeshOpacity(otherJaw, 0.15);
+                if (jaw === "maxilla") setMandibleOpacity(0.15);
+                else setMaxillaOpacity(0.15);
+
+                if (segmentedToothCount > 0) {
+                  notify(
+                    `${jaw === "maxilla" ? "Maxilla" : "Mandible"} icin ${segmentedToothCount} dis olusturuldu`
+                  );
+                } else {
+                  notify(
+                    `${jaw === "maxilla" ? "Maxilla" : "Mandible"} segmentasyonu gorsel dis parcasi uretemedi`,
+                    5000
+                  );
+                }
               }}
             />
           )}
@@ -743,7 +799,7 @@ export default function OrthoApp() {
 
                 {/* ── Back button ──────────────────────────── */}
                 <button
-                  onClick={() => setStage("segment")}
+                  onClick={() => transitionToStage("segment")}
                   className="text-xs py-2 rounded-lg transition-colors"
                   style={{
                     color: "var(--text-muted)",
@@ -787,20 +843,27 @@ export default function OrthoApp() {
             className="absolute bottom-4 left-4 flex gap-1"
             style={{ zIndex: 10 }}
           >
-            {(["perspective", "front", "top", "side", "bottom"] as const).map((m) => (
+            {([
+              { mode: "perspective" as const, label: "3D" },
+              { mode: "front" as const, label: "Frontal" },
+              { mode: "top" as const, label: "Oklüzal" },
+              { mode: "sideLeft" as const, label: "Sol Lateral" },
+              { mode: "sideRight" as const, label: "Sağ Lateral" },
+              { mode: "bottom" as const, label: "Apikal" },
+            ]).map(({ mode, label }) => (
               <button
-                key={m}
-                onClick={() => handleSetView(m)}
+                key={mode}
+                onClick={() => handleSetView(mode)}
                 className="px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all"
                 style={{
-                  background: viewMode === m ? "#2563eb" : "rgba(255,255,255,0.88)",
-                  color: viewMode === m ? "#fff" : "var(--text-muted)",
-                  border: `1px solid ${viewMode === m ? "#2563eb" : "var(--border-subtle)"}`,
+                  background: viewMode === mode ? "#2563eb" : "rgba(255,255,255,0.88)",
+                  color: viewMode === mode ? "#fff" : "var(--text-muted)",
+                  border: `1px solid ${viewMode === mode ? "#2563eb" : "var(--border-subtle)"}`,
                   backdropFilter: "blur(8px)",
                   boxShadow: "0 2px 6px rgba(0,0,0,0.08)",
                 }}
               >
-                {m === "perspective" ? "3D" : m.charAt(0).toUpperCase() + m.slice(1)}
+                {label}
               </button>
             ))}
           </div>
