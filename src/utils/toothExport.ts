@@ -46,6 +46,7 @@ export function exportToothToJSON(tooth: ToothEntity): ToothExportJSON {
     tooth_id: tooth.id,
     label: tooth.label,
     landmarks,
+    angles: tooth.angles,
     local_transformation_matrix,
     mesh_data,
   };

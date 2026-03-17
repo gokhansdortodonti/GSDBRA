@@ -72,7 +72,7 @@ export default function OrthoApp() {
   const [showGrid, setShowGrid] = useState(false);
   const [wireframe, setWireframe] = useState(false);
   const [viewMode, setViewMode] = useState<ViewPreset>("perspective");
-  const [orthographic, setOrthographic] = useState(false);
+  const [orthographic, setOrthographic] = useState(true);
   const [notification, setNotification] = useState<string | null>(null);
 
   // Occlusal plane state
@@ -582,6 +582,8 @@ export default function OrthoApp() {
                   notify(
                     `${jaw === "maxilla" ? "Maxilla" : "Mandible"} icin ${segmentedToothCount} dis olusturuldu`
                   );
+                  // Auto-switch to frontal view after successful segmentation
+                  handleSetView("front");
                 } else {
                   notify(
                     `${jaw === "maxilla" ? "Maxilla" : "Mandible"} segmentasyonu gorsel dis parcasi uretemedi`,

@@ -1416,8 +1416,9 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       rendererRef.current = renderer;
       mountRef.current.appendChild(renderer.domElement);
 
-      // OrbitControls (starts with perspective)
-      const controls = new OrbitControls(perspCam, renderer.domElement);
+      // OrbitControls (starts with the active camera)
+      const initialCam = orthographic ? orthoCam : perspCam;
+      const controls = new OrbitControls(initialCam, renderer.domElement);
       controls.enableDamping = true;
       controls.dampingFactor = 0.08;
       controls.minDistance = 1;
@@ -1431,7 +1432,7 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
       controlsRef.current = controls;
 
       // TransformControls for occlusal plane
-      const tc = new TransformControls(perspCam, renderer.domElement);
+      const tc = new TransformControls(initialCam, renderer.domElement);
       tc.setMode("rotate");
       tc.setSize(0.8);
       tc.addEventListener("dragging-changed", (e) => {
@@ -1516,6 +1517,14 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
         g.position.y = -6;
         gridRef.current = g;
         scene.add(g);
+      }
+
+      // Sync ortho state on init
+      isOrthoRef.current = orthographic;
+      if (orthographic) {
+        orthoCam.position.copy(perspCam.position);
+        orthoCam.quaternion.copy(perspCam.quaternion);
+        orthoCam.updateProjectionMatrix();
       }
 
       // Animate

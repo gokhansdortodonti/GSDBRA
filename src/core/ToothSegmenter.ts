@@ -8,9 +8,11 @@ import type {
 } from "./types";
 import { FDI_LABELS } from "./types";
 import {
+  buildAnatomicalLCS,
   buildInverseMatrix,
   buildTransformationMatrix,
   computeToothLCS,
+  extractToothAngles,
 } from "./LocalCoordinateSystem";
 
 const TOOTH_PALETTE: number[] = [
@@ -164,18 +166,15 @@ export function segmentTeeth(
   candidates
     .sort((a, b) => a.fdiId - b.fdiId)
     .forEach((candidate) => {
-      const { landmarks, rawLandmarks } = buildCanonicalLandmarks(
-        candidate,
-        sourceMesh.matrixWorld,
-      );
-
       // Use API-provided anatomical axes if available, otherwise fallback to PCA
       const apiTooth = apiTeethMap.get(candidate.fdiId);
       let lcs: import("./types").LocalCoordinateSystem;
+      let landmarks: ToothLandmarks;
+      let rawLandmarks: LandmarkPoint[];
 
       if (apiTooth) {
-        // API provides axes in the aligned coordinate space used during inference.
-        // Scale coordinates to match the mesh's local space.
+        // API returns coordinates in original STL space.
+        // Scale to match Three.js mesh local space (geometry has importScale baked in).
         const s = uniformScale;
         const origin = new THREE.Vector3(
           apiTooth.fa_point[0] * s,
@@ -183,35 +182,42 @@ export function segmentTeeth(
           apiTooth.fa_point[2] * s,
         );
 
-        // Anatomical axis mapping:
-        //   X = Mesiodistal (red)
-        //   Y = Okluzogingival (green) — crown long axis
-        //   Z = Faciolingual (blue) — buccal outward
-        lcs = {
+        // Build LCS with anatomical convention:
+        //   +X = Distal, +Y = Buccal, +Z = Occlusal
+        lcs = buildAnatomicalLCS(
           origin,
-          xAxis: new THREE.Vector3(...apiTooth.mesiodistal),
-          yAxis: new THREE.Vector3(...apiTooth.okluzogingival),
-          zAxis: new THREE.Vector3(...apiTooth.faciolingual),
-        };
-
-        // Override FA point in BOTH landmarks and rawLandmarks
-        landmarks.FA_point = origin.clone();
-
-        // Update rawLandmarks array too — this is what renders the spheres
-        const faRaw = rawLandmarks.find(
-          (lm) => lm.class === "FacialPoint" || lm.class === "FA_point",
+          new THREE.Vector3(...apiTooth.faciolingual),
+          new THREE.Vector3(...apiTooth.okluzogingival),
+          new THREE.Vector3(...apiTooth.mesiodistal),
+          candidate.fdiId,
         );
-        if (faRaw) {
-          faRaw.coord = [origin.x, origin.y, origin.z];
-        }
+
+        // Compute landmarks ON the extracted tooth surface using anatomical axes
+        const result = computeLandmarksFromAxes(
+          candidate.mesh.geometry,
+          lcs,
+          origin,
+        );
+        landmarks = result.landmarks;
+        rawLandmarks = [
+          toLandmarkPoint("FacialPoint", landmarks.FA_point, candidate.fdiId),
+          toLandmarkPoint("IncisalEdge", landmarks.incisal_edge!, candidate.fdiId),
+          toLandmarkPoint("Mesial", landmarks.mesial_contact!, candidate.fdiId),
+          toLandmarkPoint("Distal", landmarks.distal_contact!, candidate.fdiId),
+        ];
 
         console.log(
-          `[Seg] FDI ${candidate.fdiId}: using API axes (${apiTooth.name}), FA=[${origin.x.toFixed(1)}, ${origin.y.toFixed(1)}, ${origin.z.toFixed(1)}]`,
+          `[Seg] FDI ${candidate.fdiId}: API axes (${apiTooth.name}), ` +
+          `FA=[${landmarks.FA_point.x.toFixed(2)},${landmarks.FA_point.y.toFixed(2)},${landmarks.FA_point.z.toFixed(2)}]`,
         );
       } else {
-        lcs = computeToothLCS(candidate.mesh, landmarks.FA_point);
+        const canonical = buildCanonicalLandmarks(candidate, sourceMesh.matrixWorld);
+        landmarks = canonical.landmarks;
+        rawLandmarks = canonical.rawLandmarks;
+        lcs = computeToothLCS(candidate.mesh, landmarks.FA_point, candidate.fdiId);
       }
 
+      const angles = extractToothAngles(lcs);
       const localToWorld = buildTransformationMatrix(lcs);
       const worldToLocal = buildInverseMatrix(lcs);
 
@@ -222,6 +228,7 @@ export function segmentTeeth(
         landmarks,
         rawLandmarks,
         lcs,
+        angles,
         localToWorld,
         worldToLocal,
       });
@@ -641,23 +648,13 @@ function buildCanonicalLandmarks(
   const fallback = computeFallbackLandmarks(candidate, alignmentMatrix);
 
   const faPoint =
-    getLandmarkPoint(candidate.landmarks, [
-      "FacialPoint",
-      "FA_point",
-      "OuterPoint",
-    ]) ?? fallback.faPoint;
+    getLandmarkPoint(candidate.landmarks, ["FacialPoint", "FA_point", "OuterPoint"]) ?? fallback.faPoint;
   const incisalEdge =
-    getLandmarkPoint(candidate.landmarks, [
-      "IncisalEdge",
-      "incisal_edge",
-      "Cusp",
-    ]) ?? fallback.incisalEdge;
+    getLandmarkPoint(candidate.landmarks, ["IncisalEdge", "incisal_edge", "Cusp"]) ?? fallback.incisalEdge;
   const mesialContact =
-    getLandmarkPoint(candidate.landmarks, ["Mesial", "mesial_contact"]) ??
-    fallback.mesialContact;
+    getLandmarkPoint(candidate.landmarks, ["Mesial", "mesial_contact"]) ?? fallback.mesialContact;
   const distalContact =
-    getLandmarkPoint(candidate.landmarks, ["Distal", "distal_contact"]) ??
-    fallback.distalContact;
+    getLandmarkPoint(candidate.landmarks, ["Distal", "distal_contact"]) ?? fallback.distalContact;
 
   const landmarks: ToothLandmarks = {
     FA_point: faPoint,
@@ -765,6 +762,99 @@ function getLandmarkPoint(
   }
 
   return new THREE.Vector3(...landmark.coord);
+}
+
+/**
+ * Compute landmarks directly on the extracted tooth geometry using the
+ * anatomical LCS axes.  This guarantees every landmark lies on an actual
+ * vertex of the tooth mesh, eliminating the coordinate-space mismatch
+ * that can occur when landmarks are computed on the full-jaw mesh
+ * in aligned space and then projected back.
+ *
+ * Strategy:
+ *   FA point     — vertex closest to the API FA origin (snaps to surface)
+ *   IncisalEdge  — vertex most in the +Z (occlusal) LCS direction
+ *   Mesial       — vertex most in the -X (mesial) LCS direction
+ *   Distal       — vertex most in the +X (distal) LCS direction
+ */
+function computeLandmarksFromAxes(
+  geometry: THREE.BufferGeometry,
+  lcs: import("./types").LocalCoordinateSystem,
+  apiOrigin: THREE.Vector3,
+): { landmarks: ToothLandmarks } {
+  const position = geometry.getAttribute("position");
+  if (!position) {
+    return {
+      landmarks: {
+        FA_point: apiOrigin.clone(),
+        incisal_edge: apiOrigin.clone(),
+        mesial_contact: apiOrigin.clone(),
+        distal_contact: apiOrigin.clone(),
+      },
+    };
+  }
+
+  const ex = lcs.xAxis; // +X = distal
+  const ez = lcs.zAxis; // +Z = occlusal
+
+  // FA: closest vertex to API FA origin (snaps to tooth surface)
+  let faPoint = apiOrigin.clone();
+  let faBestDist = Infinity;
+
+  // Cusp/Incisal: vertex most in +Z (occlusal) direction
+  let cuspPoint = apiOrigin.clone();
+  let cuspBest = -Infinity;
+
+  // Mesial: vertex most in -X direction (toward midline)
+  let mesialPoint = apiOrigin.clone();
+  let mesialBest = -Infinity;
+
+  // Distal: vertex most in +X direction (away from midline)
+  let distalPoint = apiOrigin.clone();
+  let distalBest = -Infinity;
+
+  const tmp = new THREE.Vector3();
+
+  for (let i = 0; i < position.count; i++) {
+    tmp.set(position.getX(i), position.getY(i), position.getZ(i));
+
+    // FA: closest to API origin
+    const d2 = tmp.distanceToSquared(apiOrigin);
+    if (d2 < faBestDist) {
+      faBestDist = d2;
+      faPoint = tmp.clone();
+    }
+
+    // Cusp: max projection onto occlusal axis
+    const occScore = tmp.dot(ez);
+    if (occScore > cuspBest) {
+      cuspBest = occScore;
+      cuspPoint = tmp.clone();
+    }
+
+    // Mesial: max projection onto -distal axis
+    const mesScore = -tmp.dot(ex);
+    if (mesScore > mesialBest) {
+      mesialBest = mesScore;
+      mesialPoint = tmp.clone();
+    }
+
+    // Distal: max projection onto +distal axis
+    const disScore = tmp.dot(ex);
+    if (disScore > distalBest) {
+      distalBest = disScore;
+      distalPoint = tmp.clone();
+    }
+  }
+
+  return {
+    landmarks: {
+      FA_point: faPoint,
+      incisal_edge: cuspPoint,
+      mesial_contact: mesialPoint,
+      distal_contact: distalPoint,
+    },
+  };
 }
 
 /**

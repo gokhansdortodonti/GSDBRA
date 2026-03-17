@@ -19,11 +19,52 @@ export interface ToothLandmarks {
   distal_contact?: THREE.Vector3;
 }
 
+/**
+ * Anatomical Local Coordinate System for a single tooth.
+ *
+ * Origin : FacialPt (FA point on buccal surface)
+ *
+ * Axes follow orthodontic convention:
+ *   +X  = Distal      (away from midline)
+ *   -X  = Mesial      (toward midline)
+ *   +Y  = Facial / Buccal  (outward, surface normal at FacialPt)
+ *   -Y  = Lingual / Palatinal
+ *   +Z  = Occlusal / Incisal
+ *   -Z  = Gingival / Apical
+ *
+ * Construction:
+ *   1. ey = surface normal at FacialPt  (buccal outward)
+ *   2. ez = occlusal / incisal direction (long axis)
+ *   3. ex = ey × ez                     (cross product)
+ *   4. if ex points mesial → flip: ex = -ex   (ensure +X = distal)
+ *   5. re-orthogonalize: ez = ex × ey
+ *
+ * Clinical angles (Euler decomposition of the rotation matrix):
+ *   Rotation    (around Z) : tooth spin in occlusal plane
+ *   Tip / Angulation (around Y) : mesiodistal tilt
+ *   Torque / Inclination (around X) : buccolingual tilt
+ */
 export interface LocalCoordinateSystem {
   origin: THREE.Vector3;
+  /** +X = Distal, -X = Mesial */
   xAxis: THREE.Vector3;
+  /** +Y = Facial/Buccal, -Y = Lingual/Palatinal */
   yAxis: THREE.Vector3;
+  /** +Z = Occlusal/Incisal, -Z = Gingival/Apical */
   zAxis: THREE.Vector3;
+}
+
+/**
+ * Clinical angles extracted from the LCS rotation matrix.
+ * All values in degrees.
+ */
+export interface ToothAngles {
+  /** Rotation around Z — tooth spin in the occlusal plane */
+  rotation: number;
+  /** Tip / Angulation around Y — mesiodistal tilt */
+  tip: number;
+  /** Torque / Inclination around X — buccolingual tilt */
+  torque: number;
 }
 
 export interface ToothEntity {
@@ -33,6 +74,7 @@ export interface ToothEntity {
   landmarks: ToothLandmarks;
   rawLandmarks: LandmarkPoint[];
   lcs: LocalCoordinateSystem;
+  angles: ToothAngles;
   localToWorld: THREE.Matrix4;
   worldToLocal: THREE.Matrix4;
 }
@@ -46,6 +88,8 @@ export interface ToothExportJSON {
     mesial_contact?: [number, number, number];
     distal_contact?: [number, number, number];
   };
+  /** Clinical angles in degrees: rotation (Z), tip (Y), torque (X) */
+  angles: ToothAngles;
   local_transformation_matrix: number[][];
   mesh_data: string;
 }

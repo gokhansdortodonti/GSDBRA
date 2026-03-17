@@ -46,10 +46,12 @@ export function createLandmarkSphere(
 /**
  * Create LCS axis visualization with anatomical labels
  *
- * Axis convention (from tooth_analysis.py):
- *   X (Red)   = Mesiodistal — along dental arch
- *   Y (Green) = Okluzogingival — crown long axis
- *   Z (Blue)  = Faciolingual — buccal outward direction
+ * Orthodontic convention:
+ *   X (Red)   = +Distal / -Mesial
+ *   Y (Green) = +Facial (Buccal) / -Lingual (Palatinal)
+ *   Z (Blue)  = +Occlusal (Incisal) / -Gingival (Apical)
+ *
+ * Origin = FacialPt (FA point on buccal surface)
  */
 export function createLCSVisualization(
   lcs: LocalCoordinateSystem,
@@ -61,7 +63,7 @@ export function createLCSVisualization(
   const headLength = axisLength * 0.18;
   const headWidth = axisLength * 0.09;
 
-  // X-axis (Red) - Mesiodistal
+  // X-axis (Red) — Distal (+) / Mesial (-)
   const xArrow = new THREE.ArrowHelper(
     lcs.xAxis,
     lcs.origin,
@@ -70,10 +72,10 @@ export function createLCSVisualization(
     headLength,
     headWidth
   );
-  xArrow.name = "x_axis_md";
+  xArrow.name = "x_axis_distal";
   group.add(xArrow);
 
-  // Y-axis (Green) - Okluzogingival (crown long axis)
+  // Y-axis (Green) — Facial/Buccal (+) / Lingual (-)
   const yArrow = new THREE.ArrowHelper(
     lcs.yAxis,
     lcs.origin,
@@ -82,10 +84,10 @@ export function createLCSVisualization(
     headLength,
     headWidth
   );
-  yArrow.name = "y_axis_og";
+  yArrow.name = "y_axis_buccal";
   group.add(yArrow);
 
-  // Z-axis (Blue) - Faciolingual (buccal outward)
+  // Z-axis (Blue) — Occlusal/Incisal (+) / Gingival (-)
   const zArrow = new THREE.ArrowHelper(
     lcs.zAxis,
     lcs.origin,
@@ -94,7 +96,7 @@ export function createLCSVisualization(
     headLength,
     headWidth
   );
-  zArrow.name = "z_axis_fl";
+  zArrow.name = "z_axis_occlusal";
   group.add(zArrow);
 
   // Origin marker — small white sphere at FA point
