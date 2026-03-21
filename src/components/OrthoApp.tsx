@@ -193,7 +193,8 @@ export default function OrthoApp() {
     // Use requestAnimationFrame to allow UI to show spinner before heavy computation
     requestAnimationFrame(() => {
       try {
-        const result = viewerRef.current?.computeAutoOcclusalPlane();
+        // Use ICP-enhanced plane detection for higher accuracy
+        const result = viewerRef.current?.computeAutoOcclusalPlaneWithICP();
         if (!result) {
           setAutoComputeStatus("error");
           notify("Overlap noktası bulunamadı", 5000);
@@ -216,7 +217,12 @@ export default function OrthoApp() {
           viewerRef.current?.setView("top");
           setViewMode("top");
         }, 50);
-        notify("Oklüzal düzlem otomatik olarak hesaplandı ve hizalandı", 5000);
+
+        // Include ICP convergence info in notification
+        const icpInfo = result.icp
+          ? ` — ICP: ${result.icp.iterations} iterasyon, RMS ${result.icp.rmsError.toFixed(3)} mm${result.icp.converged ? " ✓" : ""}`
+          : "";
+        notify(`Oklüzal düzlem hesaplandı ve hizalandı${icpInfo}`, 6000);
       } catch {
         setAutoComputeStatus("error");
         notify("Hesaplama hatası", 5000);

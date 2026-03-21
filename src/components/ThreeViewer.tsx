@@ -14,7 +14,13 @@ import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { PLYLoader } from "three/examples/jsm/loaders/PLYLoader.js";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
-import { computeAutoOcclusalPlane as runAutoPlane, type AutoPlaneResult } from "./autoOcclusalPlane";
+import {
+  computeAutoOcclusalPlane as runAutoPlane,
+  computeAutoOcclusalPlaneWithICP,
+  type AutoPlaneResult,
+  type AutoPlaneResultWithICP,
+  type ICPProgressCallback,
+} from "./autoOcclusalPlane";
 import { extractJawBaseMesh, segmentTeeth } from "../core/ToothSegmenter";
 import { createAllTeethVisualization, setLCSVisibility } from "./ToothVisualization";
 import { downloadTeethJSON, exportAllTeethToJSON } from "../utils/toothExport";
@@ -69,6 +75,7 @@ export interface ThreeViewerHandle {
   transformTooth: (toothId: number, matrix: THREE.Matrix4) => void;
   // ── Occlusal alignment ──────────────────────────────────────────────────────
   computeAutoOcclusalPlane: () => AutoPlaneResult | null;
+  computeAutoOcclusalPlaneWithICP: (onProgress?: ICPProgressCallback) => AutoPlaneResultWithICP | null;
   setAnteriorPickMode: () => void;
   applyFullAlignment: (anteriorPoint: THREE.Vector3) => AlignmentBasis | null;
   applyOcclusalAlignment: (plane: OcclusalPlaneData) => void;
@@ -1083,6 +1090,45 @@ const ThreeViewer = forwardRef<ThreeViewerHandle, ThreeViewerProps>(
         const result = runAutoPlane(maxMesh.geometry, manMesh.geometry);
 
         // Visualize: remove old plane, add new single plane
+        const scene = sceneRef.current;
+        if (scene) {
+          if (occlusalPlaneRef.current) scene.remove(occlusalPlaneRef.current);
+          if (normalArrowRef.current) scene.remove(normalArrowRef.current);
+
+          const { planeMesh, normalArrow } = buildSinglePlaneVis(
+            result.normal,
+            result.center
+          );
+          scene.add(planeMesh);
+          scene.add(normalArrow);
+          occlusalPlaneRef.current = planeMesh;
+          normalArrowRef.current = normalArrow;
+        }
+
+        const planeData: OcclusalPlaneData = {
+          normal: result.normal,
+          center: result.center,
+        };
+        occlusalDataRef.current = planeData;
+
+        return result;
+      },
+
+      // ── ICP-enhanced occlusal plane computation ───────────────────────────
+      computeAutoOcclusalPlaneWithICP: (
+        onProgress?: ICPProgressCallback
+      ): AutoPlaneResultWithICP | null => {
+        const maxMesh = maxillaMeshRef.current;
+        const manMesh = mandibleMeshRef.current;
+        if (!maxMesh || !manMesh) return null;
+
+        const result = computeAutoOcclusalPlaneWithICP(
+          maxMesh.geometry,
+          manMesh.geometry,
+          onProgress
+        );
+
+        // Visualize refined plane
         const scene = sceneRef.current;
         if (scene) {
           if (occlusalPlaneRef.current) scene.remove(occlusalPlaneRef.current);

@@ -11,12 +11,24 @@
  */
 
 import * as THREE from "three";
+import { runICP, applyTransform, type ICPOptions } from "../core/ICP";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export interface AutoPlaneResult {
     normal: THREE.Vector3;
     center: THREE.Vector3;
 }
+
+export interface AutoPlaneResultWithICP extends AutoPlaneResult {
+    /** ICP metadata — undefined when ICP was skipped or unavailable */
+    icp?: {
+        rmsError: number;
+        iterations: number;
+        converged: boolean;
+    };
+}
+
+export type ICPProgressCallback = (step: "plane" | "icp", progress: number) => void;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -320,4 +332,85 @@ export function computeAutoOcclusalPlane(
     }
 
     return { normal, center: centroid };
+}
+
+// ─── ICP-enhanced occlusal plane ──────────────────────────────────────────────
+
+/**
+ * Compute the occlusal plane with ICP refinement.
+ *
+ * Workflow:
+ *   1. Initial plane estimate via computeAutoOcclusalPlane (PCA of overlap zone)
+ *   2. ICP: align mandible contact zone onto maxilla contact zone
+ *   3. Recompute plane from the ICP-refined mandible positions
+ *
+ * The ICP step improves accuracy when the initial alignment is approximate —
+ * it finds the "true" centric occlusion position and yields a tighter plane fit.
+ *
+ * @param maxillaGeom     Maxilla BufferGeometry (fixed reference)
+ * @param mandibleGeom    Mandible BufferGeometry (source, will be virtually moved)
+ * @param onProgress      Optional callback: step name + 0‥1 progress fraction
+ * @param icpOptions      Override ICP parameters (optional)
+ */
+export function computeAutoOcclusalPlaneWithICP(
+    maxillaGeom: THREE.BufferGeometry,
+    mandibleGeom: THREE.BufferGeometry,
+    onProgress?: ICPProgressCallback,
+    icpOptions?: ICPOptions
+): AutoPlaneResultWithICP {
+    // ── Step 1: Initial plane (PCA) ───────────────────────────────────────────
+    onProgress?.("plane", 0);
+    const initial = computeAutoOcclusalPlane(maxillaGeom, mandibleGeom);
+    onProgress?.("plane", 1);
+
+    // ── Step 2: ICP refinement ────────────────────────────────────────────────
+    onProgress?.("icp", 0);
+
+    const maxPos = subsamplePositions(getPositions(maxillaGeom), MAX_SAMPLE_VERTS);
+    const manPos = subsamplePositions(getPositions(mandibleGeom), MAX_SAMPLE_VERTS);
+
+    // ICP: move mandible contact zone onto maxilla contact zone
+    const icpResult = runICP(manPos, maxPos, {
+        maxIterations: 50,
+        tolerance: 1e-5,
+        trimFraction: 0.1,
+        maxPoints: 2000,
+        ...icpOptions,
+    });
+
+    onProgress?.("icp", 1);
+
+    // ── Step 3: Recompute plane from ICP-aligned mandible ────────────────────
+    // Apply cumulative ICP transform to the mandible point cloud
+    const alignedManPos = applyTransform(manPos, icpResult.rotation, icpResult.translation);
+
+    // Rerun the plane detection with refined alignment
+    // Create temporary BufferGeometry wrappers for aligned positions
+    const alignedManGeom = new THREE.BufferGeometry();
+    alignedManGeom.setAttribute(
+        "position",
+        new THREE.BufferAttribute(alignedManPos, 3)
+    );
+
+    // Use the same maxilla geometry; create a wrapped version for consistency
+    const maxGeomWrapped = new THREE.BufferGeometry();
+    maxGeomWrapped.setAttribute("position", new THREE.BufferAttribute(maxPos, 3));
+
+    let refined: AutoPlaneResult;
+    try {
+        refined = computeAutoOcclusalPlane(maxGeomWrapped, alignedManGeom);
+    } catch {
+        // Fallback to initial result if refinement fails
+        refined = initial;
+    }
+
+    return {
+        normal: refined.normal,
+        center: refined.center,
+        icp: {
+            rmsError: icpResult.rmsError,
+            iterations: icpResult.iterations,
+            converged: icpResult.converged,
+        },
+    };
 }
